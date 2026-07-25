@@ -20,7 +20,7 @@ const brickHeight = 24;
 const brickPadding = 10;
 const brickOffsetTop = 40;
 const brickOffsetLeft = 24;
-const maxPhases = 11;
+const maxPhases = Number.POSITIVE_INFINITY;
 const baseBallSpeed = 4.8;
 const phaseGrowth = 1.07;
 const hazardBulletSpeedMultiplier = 1.3;
@@ -76,6 +76,9 @@ let paddleSnaredUntil = 0;
 let paddleOverdriveUntil = 0;
 let pausedAt = 0;
 let activePointerId = null;
+let activePointerStartX = 0;
+let activePointerStartY = 0;
+let activePointerStartAt = 0;
 let paddle;
 let bricks = [];
 const keys = { ArrowLeft: false, ArrowRight: false };
@@ -2512,7 +2515,7 @@ function drawDeceptiveHint() {
   ctx.fillStyle = '#f5d0fe';
   ctx.font = 'bold 14px Arial';
   ctx.textAlign = 'left';
-  ctx.fillText('Press ARROW UP to shoot a block', 18, canvas.height - 27);
+  ctx.fillText('Press ARROW UP or swipe up to shoot a block', 18, canvas.height - 27);
 }
 
 function drawTurrets() {
@@ -2899,6 +2902,9 @@ if (actionButton) {
 canvas.addEventListener('pointerdown', (event) => {
   event.preventDefault();
   activePointerId = event.pointerId;
+  activePointerStartX = event.clientX;
+  activePointerStartY = event.clientY;
+  activePointerStartAt = performance.now();
   canvas.setPointerCapture(event.pointerId);
   movePaddleByClientX(event.clientX);
 
@@ -2916,6 +2922,22 @@ canvas.addEventListener('pointermove', (event) => {
 
 canvas.addEventListener('pointerup', (event) => {
   if (activePointerId !== event.pointerId) return;
+  const swipeDistanceX = event.clientX - activePointerStartX;
+  const swipeDistanceY = event.clientY - activePointerStartY;
+  const swipeDuration = performance.now() - activePointerStartAt;
+  if (
+    event.pointerType === 'touch' &&
+    gameState === 'running' &&
+    !paused &&
+    phaseCountdownEndsAt <= 0 &&
+    currentPhase === 5 &&
+    deceptivePhase.stage === 'guess' &&
+    swipeDistanceY < -40 &&
+    Math.abs(swipeDistanceY) > Math.abs(swipeDistanceX) &&
+    swipeDuration < 900
+  ) {
+    fireDeceptiveShot();
+  }
   activePointerId = null;
   if (canvas.hasPointerCapture(event.pointerId)) {
     canvas.releasePointerCapture(event.pointerId);
