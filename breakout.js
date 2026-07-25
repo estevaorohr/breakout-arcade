@@ -20,7 +20,7 @@ const brickHeight = 24;
 const brickPadding = 10;
 const brickOffsetTop = 40;
 const brickOffsetLeft = 24;
-const maxPhases = 10;
+const maxPhases = 11;
 const baseBallSpeed = 4.8;
 const phaseGrowth = 1.07;
 const hazardBulletSpeedMultiplier = 1.3;
@@ -40,14 +40,26 @@ let fallingItems = [];
 let fallingEmitters = [];
 let radioactiveZones = [];
 let turrets = [];
+let evilHands = [];
 let rouletteAnimations = [];
 let pendingRouletteEffects = [];
 let rouletteAnimationSeed = 1;
+let guessShots = [];
+let deceptivePhase = {
+  stage: 'idle',
+  targetBrick: null,
+  capturedBall: null,
+  stageStartedAt: 0,
+  stageEndsAt: 0,
+  nextSwapAt: 0,
+  shuffleEndsAt: 0
+};
 let waterEffect = {
   activeUntil: 0,
   startedAt: 0,
   riseDurationMs: 1200,
-  levelRows: 7
+  levelRows: 7,
+  surgeUntil: 0
 };
 let hammerCount = 0;
 let minigunCharges = 0;
@@ -58,13 +70,17 @@ let phaseCountdownEndsAt = 0;
 let autoLaunchAfterCountdown = false;
 let awaitingServe = false;
 let paddleBoostEndsAt = 0;
+let mushroomBounceUntil = 0;
+let mushroomBounceStartedAt = 0;
+let paddleSnaredUntil = 0;
+let paddleOverdriveUntil = 0;
 let pausedAt = 0;
 let activePointerId = null;
 let paddle;
 let bricks = [];
 const keys = { ArrowLeft: false, ArrowRight: false };
 
-const SPECIAL_TYPES = ['extra-ball', 'double-hit', 'mushroom', 'hammer', 'extra-life', 'roulette', 'wave'];
+const SPECIAL_TYPES = ['extra-ball', 'double-hit', 'mushroom', 'hammer', 'extra-life', 'roulette', 'wave', 'evil'];
 
 function createBall(x, y, vx = 0, vy = 0) {
   return { x, y, vx, vy, radius: 8 };
@@ -110,6 +126,11 @@ function applySpecialType(brick, type) {
 
   if (type === 'wave') {
     brick.color = '#0ea5e9';
+    return;
+  }
+
+  if (type === 'evil') {
+    brick.color = '#111111';
   }
 }
 
@@ -133,7 +154,12 @@ function movePaddleByClientX(clientX) {
 
   const scaleX = canvas.width / rect.width;
   const pointerCanvasX = (clientX - rect.left) * scaleX;
-  paddle.x = Math.max(0, Math.min(canvas.width - paddle.width, pointerCanvasX - paddle.width / 2));
+  const targetX = Math.max(0, Math.min(canvas.width - paddle.width, pointerCanvasX - paddle.width / 2));
+  if (paddleSnaredUntil > performance.now()) {
+    paddle.x += (targetX - paddle.x) * 0.15;
+    return;
+  }
+  paddle.x = targetX;
 }
 
 function triggerActionPower(now = performance.now()) {
@@ -158,6 +184,11 @@ function shiftTimeBasedState(deltaMs) {
 
   if (paddleBoostEndsAt > 0) {
     paddleBoostEndsAt += deltaMs;
+  }
+
+  if (mushroomBounceUntil > 0) {
+    mushroomBounceUntil += deltaMs;
+    mushroomBounceStartedAt += deltaMs;
   }
 
   if (nextWeaponShotAt > 0) {
@@ -190,7 +221,29 @@ function shiftTimeBasedState(deltaMs) {
   if (waterEffect.activeUntil > 0) {
     waterEffect.activeUntil += deltaMs;
     waterEffect.startedAt += deltaMs;
+    if (waterEffect.surgeUntil > 0) {
+      waterEffect.surgeUntil += deltaMs;
+    }
   }
+
+  if (deceptivePhase.stageEndsAt > 0) deceptivePhase.stageEndsAt += deltaMs;
+  if (deceptivePhase.stageStartedAt > 0) deceptivePhase.stageStartedAt += deltaMs;
+  if (deceptivePhase.nextSwapAt > 0) deceptivePhase.nextSwapAt += deltaMs;
+  if (deceptivePhase.shuffleEndsAt > 0) deceptivePhase.shuffleEndsAt += deltaMs;
+
+  if (paddleSnaredUntil > 0) {
+    paddleSnaredUntil += deltaMs;
+  }
+
+  if (paddleOverdriveUntil > 0) {
+    paddleOverdriveUntil += deltaMs;
+  }
+
+  evilHands.forEach((hand) => {
+    if (hand.pauseUntil) hand.pauseUntil += deltaMs;
+    if (hand.releaseAt) hand.releaseAt += deltaMs;
+    if (hand.disappearAt) hand.disappearAt += deltaMs;
+  });
 
   balls.forEach((ball) => {
     if (ball.nuclearBoostEndsAt) {
@@ -203,13 +256,27 @@ function getPhasePercent() {
   return Math.round(phaseMultiplier * 100);
 }
 
+function getPhaseTitle() {
+  return currentPhase === 5 ? 'Fase Enganadora' : `Phase ${currentPhase}`;
+}
+
 function isWaterEffectActive(now = performance.now()) {
   return waterEffect.activeUntil > now;
 }
 
+function isWaveSurgeActive(now = performance.now()) {
+  return waterEffect.surgeUntil > now;
+}
+
+function getWaterSlowFactor(now = performance.now()) {
+  if (!isWaterEffectActive(now)) return 1;
+  return isWaveSurgeActive(now) ? 0.4 : 0.6;
+}
+
 function getWaterTargetY() {
   const platformHeight = paddle ? paddle.height : 14;
-  const target = canvas.height - platformHeight * waterEffect.levelRows;
+  const rows = isWaveSurgeActive() ? waterEffect.levelRows * 2 : waterEffect.levelRows;
+  const target = canvas.height - platformHeight * rows;
   return Math.max(brickOffsetTop + 12, Math.min(canvas.height - 24, target));
 }
 
@@ -225,8 +292,27 @@ function getWaterSurfaceY(now = performance.now()) {
 
 function activateWaterWave(now = performance.now()) {
   waterEffect.startedAt = now;
-  waterEffect.activeUntil = now + 30000;
-  statusDisplay.textContent = 'Wave activated: rising water for 30s';
+  waterEffect.activeUntil = now + 20000;
+  waterEffect.surgeUntil = 0;
+  statusDisplay.textContent = 'Wave activated: rising water for 20s';
+}
+
+function absorbRainIntoWave(item, now) {
+  if (!isWaterEffectActive(now)) return false;
+
+  const rainyKinds = new Set(['rain-drop', 'acid-cloud', 'lava-meteor', 'nuclear-drop', 'harm-drop', 'lava-drop']);
+  if (!rainyKinds.has(item.kind)) return false;
+
+  const surfaceY = getWaterSurfaceY(now);
+  if (item.y + item.height < surfaceY) return false;
+
+  if (!isWaveSurgeActive(now)) {
+    waterEffect.surgeUntil = now + 5000;
+    statusDisplay.textContent = 'Wave surge! Water height doubled for 5s';
+  }
+
+  waterEffect.activeUntil += 1000;
+  return true;
 }
 
 function updateEffectsDisplay(now = performance.now()) {
@@ -324,7 +410,8 @@ function spawnTimedDropEmitter(options) {
     width: options.width || 18,
     height: options.height || 18,
     vy: options.vy || 2.2,
-    driftX: options.driftX || 0
+    driftX: options.driftX || 0,
+    fromTop: Boolean(options.fromTop)
   });
 }
 
@@ -332,7 +419,7 @@ function emitFromTimedDropEmitter(emitter) {
   const spreadX = emitter.spreadX || 0;
   const spreadY = emitter.spreadY || 0;
   const x = emitter.originX + (Math.random() * 2 - 1) * spreadX;
-  const y = emitter.originY + (Math.random() * 2 - 1) * spreadY;
+  const y = emitter.fromTop ? -emitter.height : emitter.originY + (Math.random() * 2 - 1) * spreadY;
   const wobbleX = (Math.random() * 2 - 1) * 0.35;
 
   fallingItems.push({
@@ -389,7 +476,7 @@ function deployMinigun(now = performance.now()) {
     height: 20,
     endsAt: now + 10000,
     nextShotAt: now,
-    intervalMs: 300,
+    intervalMs: 400,
     type: 'minigun'
   });
   statusDisplay.textContent = 'Minigun deployed for 10s';
@@ -416,21 +503,24 @@ function updateTurrets(now) {
     }
 
     while (now >= turret.nextShotAt && now < turret.endsAt) {
-      const target = getTurretTargetPoint();
-      const startX = turret.x + 3;
-      const startY = turret.y + turret.height / 2;
-      const dx = target.x - startX;
-      const dy = target.y - startY;
-      const magnitude = Math.hypot(dx, dy) || 1;
-      const speed = turret.type === 'minigun' ? 5.4 : 4.4;
-      turretBullets.push({
-        x: startX,
-        y: startY,
-        radius: turret.type === 'minigun' ? 3 : 4,
-        vx: (dx / magnitude) * speed,
-        vy: (dy / magnitude) * speed,
-        color: turret.type === 'minigun' ? '#fde047' : '#facc15'
-      });
+      const shotCount = currentPhase === 7 && turret.kind === 'bazooka' ? (Math.random() < 0.5 ? 1 : 2) : 1;
+      for (let shot = 0; shot < shotCount; shot += 1) {
+        const target = getTurretTargetPoint();
+        const startX = turret.x + 3;
+        const startY = turret.y + turret.height / 2;
+        const dx = target.x - startX;
+        const dy = target.y - startY;
+        const magnitude = Math.hypot(dx, dy) || 1;
+        const speed = turret.type === 'minigun' ? 5.4 : 4.4;
+        turretBullets.push({
+          x: startX,
+          y: startY,
+          radius: turret.type === 'minigun' ? 3 : 4,
+          vx: (dx / magnitude) * speed,
+          vy: (dy / magnitude) * speed,
+          color: turret.type === 'minigun' ? '#c084fc' : '#a855f7'
+        });
+      }
       turret.nextShotAt += turret.intervalMs;
     }
 
@@ -593,11 +683,17 @@ function resetGame() {
   fallingEmitters = [];
   radioactiveZones = [];
   turrets = [];
+  evilHands = [];
+  guessShots = [];
   rouletteAnimations = [];
   pendingRouletteEffects = [];
   rouletteAnimationSeed = 1;
   waterEffect.activeUntil = 0;
   waterEffect.startedAt = 0;
+  waterEffect.surgeUntil = 0;
+  deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
+  paddleSnaredUntil = 0;
+  paddleOverdriveUntil = 0;
   hammerCount = 0;
   minigunCharges = 0;
   pausedAt = 0;
@@ -631,11 +727,17 @@ function initializeRound() {
   fallingEmitters = [];
   radioactiveZones = [];
   turrets = [];
+  evilHands = [];
+  guessShots = [];
   rouletteAnimations = [];
   pendingRouletteEffects = [];
   rouletteAnimationSeed = 1;
   waterEffect.activeUntil = 0;
   waterEffect.startedAt = 0;
+  waterEffect.surgeUntil = 0;
+  deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
+  paddleSnaredUntil = 0;
+  paddleOverdriveUntil = 0;
   turretBullets = [];
   fallingEmitters = [];
   phaseCountdownEndsAt = 0;
@@ -663,11 +765,17 @@ function startGame() {
   fallingEmitters = [];
   radioactiveZones = [];
   turrets = [];
+  evilHands = [];
+  guessShots = [];
   rouletteAnimations = [];
   pendingRouletteEffects = [];
   rouletteAnimationSeed = 1;
   waterEffect.activeUntil = 0;
   waterEffect.startedAt = 0;
+  waterEffect.surgeUntil = 0;
+  deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
+  paddleSnaredUntil = 0;
+  paddleOverdriveUntil = 0;
   hammerCount = 0;
   minigunCharges = 0;
   pausedAt = 0;
@@ -723,6 +831,10 @@ function applySpecialBricks(created) {
     applySpecialType(created[idx], 'wave');
   });
 
+  pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
+    applySpecialType(created[idx], 'evil');
+  });
+
   pickDistinctBrickIndices(allIndices, currentPhase, blocked).forEach((idx) => {
     applySpecialType(created[idx], 'double-hit');
   });
@@ -743,6 +855,35 @@ function applySpecialBricks(created) {
 function buildBricks() {
   const created = [];
 
+  if (currentPhase === 5) {
+    const count = 5;
+    const deceptiveWidth = 86;
+    const deceptiveHeight = 30;
+    const gap = 20;
+    const totalWidth = count * deceptiveWidth + (count - 1) * gap;
+    const startX = (canvas.width - totalWidth) / 2;
+    const y = brickOffsetTop + 56;
+
+    for (let i = 0; i < count; i += 1) {
+      created.push({
+        row: 0,
+        col: i,
+        x: startX + i * (deceptiveWidth + gap),
+        y,
+        width: deceptiveWidth,
+        height: deceptiveHeight,
+        alive: true,
+        color: '#7c3aed',
+        boss: false,
+        type: 'deceptive',
+        hp: 1,
+        hits: 0
+      });
+    }
+
+    return created;
+  }
+
   if (currentPhase === 3) {
     const centerX = canvas.width / 2 - 40;
     const centerY = brickOffsetTop + 1 * (brickHeight + brickPadding);
@@ -760,21 +901,21 @@ function buildBricks() {
 
     const nonBossIndices = [0, 2, 3, 4, 5, 6, 7, 8];
     const rainIndex = nonBossIndices[Math.floor(Math.random() * nonBossIndices.length)];
-    applySpecialType(bossBlocks[rainIndex], 'nuclear');
+    applySpecialType(bossBlocks[rainIndex], 'harm-drop');
 
     const remaining = nonBossIndices.filter((index) => index !== rainIndex);
     const rouletteIndex = remaining[Math.floor(Math.random() * remaining.length)];
     applySpecialType(bossBlocks[rouletteIndex], 'roulette');
 
     const remainingAfterRoulette = remaining.filter((index) => index !== rouletteIndex);
-    const waveIndex = remainingAfterRoulette[Math.floor(Math.random() * remainingAfterRoulette.length)];
-    applySpecialType(bossBlocks[waveIndex], 'wave');
+    const evilIndex = remainingAfterRoulette[Math.floor(Math.random() * remainingAfterRoulette.length)];
+    applySpecialType(bossBlocks[evilIndex], 'evil');
 
-    const remainingAfterWave = remainingAfterRoulette.filter((index) => index !== waveIndex);
-    const heartIndex = remainingAfterWave[Math.floor(Math.random() * remainingAfterWave.length)];
+    const remainingAfterEvil = remainingAfterRoulette.filter((index) => index !== evilIndex);
+    const heartIndex = remainingAfterEvil[Math.floor(Math.random() * remainingAfterEvil.length)];
     applySpecialType(bossBlocks[heartIndex], 'extra-life');
 
-    const remainingAfterHeart = remainingAfterWave.filter((index) => index !== heartIndex);
+    const remainingAfterHeart = remainingAfterEvil.filter((index) => index !== heartIndex);
     const randomIndex = remainingAfterHeart[Math.floor(Math.random() * remainingAfterHeart.length)];
     const phase3Specials = ['extra-ball', 'double-hit', 'mushroom', 'hammer'];
     const randomType = phase3Specials[Math.floor(Math.random() * phase3Specials.length)];
@@ -785,7 +926,7 @@ function buildBricks() {
   }
 
   for (let row = 0; row < brickRows; row += 1) {
-    if (currentPhase === 6 && row === 0) {
+    if (currentPhase === 7 && row === 0) {
       continue;
     }
 
@@ -822,7 +963,7 @@ function buildGuns() {
     ];
   }
 
-  if (currentPhase === 6) {
+  if (currentPhase === 7) {
     return [
       { x: 120, y: brickOffsetTop, width: 34, height: 20, color: '#f97316', kind: 'bazooka', mobile: true, vx: 1.35, vy: 0, motion: 'horizontal', startOffsetMs: 0, intervalMs: 3000 },
       { x: 440, y: brickOffsetTop, width: 34, height: 20, color: '#eab308', kind: 'bazooka', mobile: true, vx: -1.35, vy: 0, motion: 'horizontal', startOffsetMs: 1500, intervalMs: 3000 }
@@ -848,14 +989,23 @@ function startNextPhase() {
   fallingEmitters = [];
   radioactiveZones = [];
   turrets = [];
+  evilHands = [];
+  guessShots = [];
   rouletteAnimations = [];
   pendingRouletteEffects = [];
   rouletteAnimationSeed = 1;
   waterEffect.activeUntil = 0;
   waterEffect.startedAt = 0;
+  waterEffect.surgeUntil = 0;
+  deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
+  paddleSnaredUntil = 0;
+  paddleOverdriveUntil = 0;
   turretBullets = [];
   fallingEmitters = [];
   if (balls.length) {
+    if (currentPhase === 5) {
+      balls = [balls[0]];
+    }
     balls.forEach((ball) => {
       const magnitude = Math.hypot(ball.vx, ball.vy) || 0;
       if (magnitude > 0) {
@@ -872,12 +1022,12 @@ function startNextPhase() {
   awaitingServe = false;
   resetWeaponCycle();
   updateHud();
-  statusDisplay.textContent = `Phase ${currentPhase} starts in 3...`;
+  statusDisplay.textContent = `${getPhaseTitle()} starts in 3...`;
 }
 
 function updateHud(now = performance.now()) {
   scoreDisplay.textContent = `Score: ${score}`;
-  phaseDisplay.textContent = `Phase ${currentPhase} • Speed ${getPhasePercent()}%`;
+  phaseDisplay.textContent = `${getPhaseTitle()} • Speed ${getPhasePercent()}%`;
   livesDisplay.textContent = `Lives: ${lives}`;
   updateEffectsDisplay(now);
 }
@@ -920,6 +1070,7 @@ function loseLife(messageOnSurvive) {
   lives = Math.max(0, lives - 1);
   updateHud();
   bullets = [];
+  guessShots = [];
   fallingItems = [];
   paddle.width = paddle.baseWidth;
   paddleBoostEndsAt = 0;
@@ -936,12 +1087,16 @@ function loseLife(messageOnSurvive) {
 }
 
 function spawnFallingItem(kind, x, y, color, vy = 2.2) {
+  const largeKinds = new Set(['mushroom', 'hammer', 'heart']);
+  const size = largeKinds.has(kind) ? 36 : 18;
+  const adjustedX = largeKinds.has(kind) ? x - 9 : x;
+  const adjustedY = largeKinds.has(kind) ? y - 9 : y;
   fallingItems.push({
     kind,
-    x,
-    y,
-    width: 18,
-    height: 18,
+    x: adjustedX,
+    y: adjustedY,
+    width: size,
+    height: size,
     vy,
     color
   });
@@ -949,33 +1104,56 @@ function spawnFallingItem(kind, x, y, color, vy = 2.2) {
 
 function spawnHarmRain(brick, now = performance.now()) {
   spawnTimedDropEmitter({
-    kind: 'harm-drop',
-    label: 'Toxic rain',
-    color: '#60a5fa',
+    kind: 'rain-drop',
+    label: 'Rain',
+    color: '#7dd3fc',
     originX: canvas.width / 2,
-    originY: canvas.height * 0.2,
-    spreadX: canvas.width * 0.5,
-    spreadY: canvas.height * 0.4,
+    originY: brickOffsetTop,
+    spreadX: canvas.width * 0.48,
+    spreadY: 0,
     intervalMs: 1000,
     totalDrops: 15,
     durationMs: 15000,
-    vy: 2.2
+    vy: 1.76,
+    fromTop: true
+  });
+}
+
+function spawnAcidRain(brick, now = performance.now()) {
+  spawnTimedDropEmitter({
+    kind: 'acid-cloud',
+    label: 'Acid rain',
+    color: '#84cc16',
+    originX: canvas.width / 2,
+    originY: brickOffsetTop,
+    spreadX: canvas.width * 0.48,
+    spreadY: 0,
+    intervalMs: 1000,
+    totalDrops: 15,
+    durationMs: 15000,
+    vy: 1.76,
+    width: 18,
+    height: 13,
+    fromTop: true
   });
 }
 
 function spawnLavaRain(brick, now = performance.now()) {
   spawnTimedDropEmitter({
-    kind: 'lava-drop',
+    kind: 'lava-meteor',
     label: 'Lava rain',
-    color: '#f97316',
-    originX: brick.x + brick.width / 2,
-    originY: brick.y + brick.height / 2,
-    spreadX: canvas.width * 0.46,
-    spreadY: canvas.height * 0.35,
+    color: '#7f1d1d',
+    originX: canvas.width / 2,
+    originY: brickOffsetTop,
+    spreadX: canvas.width * 0.48,
+    spreadY: 0,
     intervalMs: 1000,
     totalDrops: 10,
     durationMs: 10000,
-    vy: 2.3
+    vy: 2.645,
+    width: 29,
+    height: 29,
+    fromTop: true
   });
 }
 
@@ -983,8 +1161,164 @@ function spawnDropBurst(dropCount = 6) {
   for (let i = 0; i < dropCount; i += 1) {
     const randomX = Math.random() * (canvas.width - 18);
     const randomY = Math.random() * (canvas.height * 0.45);
-    spawnFallingItem('harm-drop', randomX, randomY, '#60a5fa', 2.2 + Math.random() * 0.4);
+    spawnFallingItem('acid-cloud', randomX, randomY, '#84cc16', 1.76 + Math.random() * 0.25);
   }
+}
+
+function spawnEvilHand(brick, now = performance.now()) {
+  evilHands.push({
+    x: brick.x + brick.width / 2 - 18,
+    y: brick.y + brick.height,
+    width: 36,
+    height: 54,
+    vy: 2.625,
+    state: 'descending',
+    capturedBall: null,
+    canCatchBallAt: now + 800,
+    releaseAt: 0,
+    pauseUntil: 0,
+    disappearAt: 0
+  });
+}
+
+function launchBallToRandomCorner(ball, now = performance.now()) {
+  if (!ball) return;
+
+  const margin = 26;
+  const corners = [
+    { x: margin, y: margin },
+    { x: canvas.width - margin, y: margin },
+    { x: margin, y: canvas.height * 0.52 },
+    { x: canvas.width - margin, y: canvas.height * 0.52 }
+  ];
+  const corner = corners[Math.floor(Math.random() * corners.length)];
+  ball.x = corner.x;
+  ball.y = corner.y;
+
+  const centerX = canvas.width / 2;
+  const centerY = canvas.height / 2;
+  const dx = centerX - ball.x;
+  const dy = centerY - ball.y;
+  const magnitude = Math.hypot(dx, dy) || 1;
+  const speed = phaseBallSpeed * 1.15;
+  let vx = (dx / magnitude) * speed;
+  let vy = (dy / magnitude) * speed;
+
+  // Keep launch angle at least 15 degrees away from the horizontal axis.
+  const minVertical = speed * Math.sin(Math.PI / 12);
+  if (Math.abs(vy) < minVertical) {
+    vy = Math.sign(vy || (Math.random() < 0.5 ? -1 : 1)) * minVertical;
+    const horizontal = Math.sqrt(Math.max(1, speed * speed - vy * vy));
+    vx = Math.sign(vx || (Math.random() < 0.5 ? -1 : 1)) * horizontal;
+  }
+
+  ball.vx = vx;
+  ball.vy = vy;
+  ball.malignBoostEndsAt = now + 3000;
+}
+
+function updateEvilHands(now, delta) {
+  if (!evilHands.length) return;
+
+  evilHands = evilHands.filter((hand) => {
+    if (hand.disappearAt && now >= hand.disappearAt) {
+      return false;
+    }
+
+    if (hand.state === 'holding-paddle') {
+      if (now >= hand.releaseAt) {
+        paddleOverdriveUntil = now + 10000;
+        hand.disappearAt = now;
+        return false;
+      }
+      hand.x = paddle.x + paddle.width / 2 - hand.width / 2;
+      hand.y = paddle.y - hand.height + 2;
+      return true;
+    }
+
+    if (hand.state === 'holding-ball') {
+      const ball = hand.capturedBall;
+      if (!ball) return false;
+
+      ball.x = hand.x + hand.width / 2;
+      ball.y = hand.y + hand.height * 0.55;
+      if (now >= hand.releaseAt) {
+        launchBallToRandomCorner(ball, now);
+        hand.disappearAt = now;
+        return false;
+      }
+      return true;
+    }
+
+    if (hand.state === 'waiting') {
+      const paddleOverlap =
+        hand.x + hand.width > paddle.x &&
+        hand.x < paddle.x + paddle.width &&
+        hand.y + hand.height > paddle.y &&
+        hand.y < paddle.y + paddle.height;
+
+      if (paddleOverlap) {
+        paddleSnaredUntil = now + 1000;
+        hand.state = 'holding-paddle';
+        hand.releaseAt = now + 1000;
+        hand.x = paddle.x + paddle.width / 2 - hand.width / 2;
+        hand.y = paddle.y - hand.height + 2;
+        statusDisplay.textContent = 'Evil hand trapped the paddle';
+        return true;
+      }
+
+      if (now >= hand.pauseUntil) {
+        return false;
+      }
+      return true;
+    }
+
+    hand.y += hand.vy * delta;
+
+    const paddleOverlap =
+      hand.x + hand.width > paddle.x &&
+      hand.x < paddle.x + paddle.width &&
+      hand.y + hand.height > paddle.y &&
+      hand.y < paddle.y + paddle.height;
+
+    if (paddleOverlap) {
+      paddleSnaredUntil = now + 1000;
+      hand.state = 'holding-paddle';
+      hand.releaseAt = now + 1000;
+      hand.x = paddle.x + paddle.width / 2 - hand.width / 2;
+      hand.y = paddle.y - hand.height + 2;
+      statusDisplay.textContent = 'Evil hand trapped the paddle';
+      return true;
+    }
+
+    const ball = now >= hand.canCatchBallAt ? balls.find((candidate) => {
+      if (!candidate) return false;
+      return (
+        candidate.x + candidate.radius > hand.x &&
+        candidate.x - candidate.radius < hand.x + hand.width &&
+        candidate.y + candidate.radius > hand.y &&
+        candidate.y - candidate.radius < hand.y + hand.height
+      );
+    }) : null;
+
+    if (ball) {
+      hand.state = 'holding-ball';
+      hand.capturedBall = ball;
+      hand.releaseAt = now + 2000;
+      ball.handFrozenUntil = hand.releaseAt;
+      statusDisplay.textContent = 'Evil hand grabbed the ball';
+      return true;
+    }
+
+    if (hand.y + hand.height >= paddle.y) {
+      hand.y = paddle.y - hand.height;
+      hand.state = 'waiting';
+      hand.pauseUntil = now + 3000;
+      return true;
+    }
+
+    return true;
+  });
 }
 
 function resolveRouletteEffects(now = performance.now()) {
@@ -1037,7 +1371,7 @@ function resolveRouletteEffects(now = performance.now()) {
     }
 
     if (outcome === 'acid-rain') {
-      spawnHarmRain(brick, now);
+      spawnAcidRain(brick, now);
       statusDisplay.textContent = 'Roulette: acid rain';
       return;
     }
@@ -1064,7 +1398,7 @@ function activateRouletteEffect(ball, brick, spawnedBalls, now) {
     width: brick.width,
     height: brick.height,
     startedAt: now,
-    endsAt: now + 2000,
+    endsAt: now + 3000,
     spinEndsAt: now + 2000,
     resultColor: null,
     rotation: 0
@@ -1132,7 +1466,8 @@ function fireFromGun(gun) {
     const dx = targetX - startX;
     const dy = targetY - startY;
     const magnitude = Math.hypot(dx, dy) || 1;
-    const speed = 3.5 * hazardBulletSpeedMultiplier;
+    const speedModifier = currentPhase === 3 ? 0.85 : 1;
+    const speed = 3.5 * hazardBulletSpeedMultiplier * speedModifier;
 
     bullets.push({
       x: startX,
@@ -1146,7 +1481,8 @@ function fireFromGun(gun) {
   }
 
   if (gun.kind === 'bazooka') {
-    for (let i = 0; i < 2; i += 1) {
+    const shotCount = currentPhase === 7 ? (Math.random() < 0.5 ? 1 : 2) : 2;
+    for (let i = 0; i < shotCount; i += 1) {
       const angle = (55 + Math.random() * 70) * (Math.PI / 180);
       const speed = (3.2 + Math.random() * 0.8) * hazardBulletSpeedMultiplier;
       bullets.push({
@@ -1174,7 +1510,181 @@ function updateWeaponFire(now) {
   }
 }
 
+function fireDeceptiveShot() {
+  if (currentPhase !== 5 || deceptivePhase.stage !== 'guess' || paused) return false;
+
+  guessShots.push({
+    x: paddle.x + paddle.width / 2,
+    y: paddle.y - 6,
+    radius: 4,
+    vy: -8
+  });
+  return true;
+}
+
+function beginDeceptiveSequence(ball, brick, now) {
+  deceptivePhase.stage = 'locking';
+  deceptivePhase.targetBrick = brick;
+  deceptivePhase.capturedBall = ball;
+  deceptivePhase.stageStartedAt = now;
+  deceptivePhase.stageEndsAt = now + 3000;
+  deceptivePhase.nextSwapAt = 0;
+  deceptivePhase.shuffleEndsAt = 0;
+  ball.deceptiveFrozen = true;
+  statusDisplay.textContent = 'Watch closely... the blocks will shuffle';
+}
+
+function startDeceptiveShuffle(now) {
+  deceptivePhase.stage = 'shuffling';
+  deceptivePhase.stageStartedAt = now;
+  deceptivePhase.nextSwapAt = now;
+  deceptivePhase.shuffleEndsAt = now + 15000;
+  statusDisplay.textContent = 'Shuffling! Follow where the ball is hidden';
+}
+
+function triggerDeceptiveSwap(now) {
+  const alive = bricks.filter((brick) => brick.alive && brick.type === 'deceptive');
+  if (alive.length < 2) return;
+
+  const first = alive[Math.floor(Math.random() * alive.length)];
+  let second = alive[Math.floor(Math.random() * alive.length)];
+  while (second === first && alive.length > 1) {
+    second = alive[Math.floor(Math.random() * alive.length)];
+  }
+
+  const firstStartX = first.x;
+  const firstStartY = first.y;
+  const secondStartX = second.x;
+  const secondStartY = second.y;
+
+  first.swapFromX = firstStartX;
+  first.swapFromY = firstStartY;
+  first.swapToX = secondStartX;
+  first.swapToY = secondStartY;
+  first.swapStartAt = now;
+  first.swapEndAt = now + 200;
+  first.swapArcDir = Math.random() < 0.5 ? -1 : 1;
+
+  second.swapFromX = secondStartX;
+  second.swapFromY = secondStartY;
+  second.swapToX = firstStartX;
+  second.swapToY = firstStartY;
+  second.swapStartAt = now;
+  second.swapEndAt = now + 200;
+  second.swapArcDir = -first.swapArcDir;
+}
+
+function updateDeceptiveBrickSwaps(now) {
+  bricks.forEach((brick) => {
+    if (!brick.swapEndAt) return;
+
+    const span = Math.max(1, brick.swapEndAt - brick.swapStartAt);
+    const t = Math.max(0, Math.min(1, (now - brick.swapStartAt) / span));
+    const arc = Math.sin(t * Math.PI) * 16 * (brick.swapArcDir || 1);
+    brick.x = brick.swapFromX + (brick.swapToX - brick.swapFromX) * t;
+    brick.y = brick.swapFromY + (brick.swapToY - brick.swapFromY) * t + arc;
+
+    if (now >= brick.swapEndAt) {
+      brick.x = brick.swapToX;
+      brick.y = brick.swapToY;
+      delete brick.swapFromX;
+      delete brick.swapFromY;
+      delete brick.swapToX;
+      delete brick.swapToY;
+      delete brick.swapStartAt;
+      delete brick.swapEndAt;
+      delete brick.swapArcDir;
+    }
+  });
+}
+
+function updateDeceptiveGuessShots(now, delta) {
+  if (currentPhase !== 5) {
+    guessShots = [];
+    return;
+  }
+
+  if (deceptivePhase.stage !== 'guess') {
+    guessShots = [];
+    return;
+  }
+
+  guessShots = guessShots.filter((shot) => {
+    shot.y += shot.vy * delta;
+    if (shot.y < -20) return false;
+
+    const hitBrick = bricks.find((brick) => {
+      if (!brick.alive || brick.type !== 'deceptive') return false;
+      return (
+        shot.x + shot.radius > brick.x &&
+        shot.x - shot.radius < brick.x + brick.width &&
+        shot.y + shot.radius > brick.y &&
+        shot.y - shot.radius < brick.y + brick.height
+      );
+    });
+
+    if (!hitBrick) return true;
+
+    if (hitBrick === deceptivePhase.targetBrick) {
+      statusDisplay.textContent = 'Correct block! Phase cleared';
+      bricks.forEach((brick) => {
+        if (brick.type === 'deceptive') brick.alive = false;
+      });
+      return false;
+    }
+
+    hitBrick.alive = false;
+    if (deceptivePhase.targetBrick && !deceptivePhase.targetBrick.alive) {
+      const aliveAlternatives = bricks.filter((brick) => brick.alive && brick.type === 'deceptive');
+      deceptivePhase.targetBrick = aliveAlternatives[Math.floor(Math.random() * aliveAlternatives.length)] || null;
+    }
+    lives = Math.max(0, lives - 1);
+    updateHud(now);
+    if (lives <= 0) {
+      endGame('Game over');
+      return false;
+    }
+    statusDisplay.textContent = 'Wrong block! You lost one life, try again';
+    return false;
+  });
+}
+
+function updateDeceptivePhase(now) {
+  if (currentPhase !== 5) return;
+
+  updateDeceptiveBrickSwaps(now);
+
+  if (deceptivePhase.capturedBall && deceptivePhase.targetBrick && deceptivePhase.targetBrick.alive) {
+    deceptivePhase.capturedBall.x = deceptivePhase.targetBrick.x + deceptivePhase.targetBrick.width / 2;
+    deceptivePhase.capturedBall.y = deceptivePhase.targetBrick.y + deceptivePhase.targetBrick.height / 2;
+  }
+
+  if (deceptivePhase.stage === 'locking' && now >= deceptivePhase.stageEndsAt) {
+    startDeceptiveShuffle(now);
+  }
+
+  if (deceptivePhase.stage === 'shuffling') {
+    while (now >= deceptivePhase.nextSwapAt && now < deceptivePhase.shuffleEndsAt) {
+      triggerDeceptiveSwap(now);
+      deceptivePhase.nextSwapAt += 200;
+    }
+
+    if (now >= deceptivePhase.shuffleEndsAt) {
+      deceptivePhase.stage = 'guess';
+      statusDisplay.textContent = 'Press Arrow Up to shoot the hidden block';
+    }
+  }
+}
+
 function handleBrickCollision(ball, brick, previousBallX, previousBallY, spawnedBalls, now) {
+  if (currentPhase === 5 && brick.type === 'deceptive') {
+    if (deceptivePhase.stage === 'idle') {
+      beginDeceptiveSequence(ball, brick, now);
+    }
+    ball.deceptiveFrozen = true;
+    return;
+  }
+
   if (brick.type === 'nuclear') {
     score += Math.round(14 * phaseMultiplier);
     updateHud(now);
@@ -1207,9 +1717,12 @@ function handleBrickCollision(ball, brick, previousBallX, previousBallY, spawned
       activateRouletteEffect(ball, brick, spawnedBalls, now);
     } else if (brick.type === 'wave') {
       activateWaterWave(now);
+    } else if (brick.type === 'evil') {
+      spawnEvilHand(brick, now);
+      statusDisplay.textContent = 'Evil hand summoned';
     } else if (brick.type === 'harm-drop') {
       spawnHarmRain(brick, now);
-      statusDisplay.textContent = 'Watch out: toxic rain';
+      statusDisplay.textContent = 'Watch out: rain storm';
     } else if (brick.type === 'mushroom') {
       spawnFallingItem('mushroom', brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 9, undefined, 2.2 * 1.38);
       statusDisplay.textContent = 'Catch the mushroom power-up';
@@ -1266,12 +1779,12 @@ function update(delta) {
   if (phaseCountdownEndsAt > 0) {
     const remaining = Math.ceil((phaseCountdownEndsAt - now) / 1000);
     if (remaining > 0) {
-      statusDisplay.textContent = `Phase ${currentPhase} starts in ${remaining}...`;
+      statusDisplay.textContent = `${getPhaseTitle()} starts in ${remaining}...`;
       return;
     }
 
     phaseCountdownEndsAt = 0;
-    statusDisplay.textContent = `Phase ${currentPhase} — speed ${getPhasePercent()}%`;
+    statusDisplay.textContent = `${getPhaseTitle()} — speed ${getPhasePercent()}%`;
     if (autoLaunchAfterCountdown) {
       launchBallRandom();
       autoLaunchAfterCountdown = false;
@@ -1280,10 +1793,14 @@ function update(delta) {
 
   updateTimedDropEmitters(now);
   updateTurrets(now);
+  updateEvilHands(now, delta);
+  updateDeceptivePhase(now);
+  updateDeceptiveGuessShots(now, delta);
 
   if (waterEffect.activeUntil > 0 && now >= waterEffect.activeUntil) {
     waterEffect.activeUntil = 0;
     waterEffect.startedAt = 0;
+    waterEffect.surgeUntil = 0;
   }
 
   if (awaitingServe) {
@@ -1302,7 +1819,8 @@ function update(delta) {
   }
 
   const waterActive = isWaterEffectActive(now);
-  const paddleSpeedFactor = waterActive ? 0.6 : 1;
+  const snareFactor = paddleSnaredUntil > now ? 0.15 : 1;
+  const paddleSpeedFactor = getWaterSlowFactor(now) * snareFactor * (paddleOverdriveUntil > now ? 1.15 : 1);
 
   if (keys.ArrowLeft) {
     paddle.x = Math.max(0, paddle.x - paddle.speed * paddleSpeedFactor * delta);
@@ -1317,8 +1835,10 @@ function update(delta) {
   bullets = bullets.filter((bullet) => {
     if (gameState !== 'running') return false;
 
-    bullet.x += bullet.vx * delta;
-    bullet.y += bullet.vy * delta;
+    const waterFactor = waterActive && bullet.y >= getWaterSurfaceY(now) ? getWaterSlowFactor(now) : 1;
+
+    bullet.x += bullet.vx * delta * waterFactor;
+    bullet.y += bullet.vy * delta * waterFactor;
 
     if (bullet.x - bullet.radius <= 0) {
       bullet.x = bullet.radius;
@@ -1347,8 +1867,9 @@ function update(delta) {
   });
 
   turretBullets = turretBullets.filter((bullet) => {
-    bullet.x += bullet.vx * delta;
-    bullet.y += bullet.vy * delta;
+    const waterFactor = waterActive && bullet.y >= getWaterSurfaceY(now) ? getWaterSlowFactor(now) : 1;
+    bullet.x += bullet.vx * delta * waterFactor;
+    bullet.y += bullet.vy * delta * waterFactor;
 
     if (bullet.x - bullet.radius <= 0) {
       bullet.x = bullet.radius;
@@ -1387,8 +1908,9 @@ function update(delta) {
   });
 
   fallingItems = fallingItems.filter((item) => {
-    item.x += (item.vx || 0) * delta;
-    item.y += item.vy * delta;
+    const waterFactor = waterActive && item.y + item.height >= getWaterSurfaceY(now) ? getWaterSlowFactor(now) : 1;
+    item.x += (item.vx || 0) * delta * waterFactor;
+    item.y += item.vy * delta * waterFactor;
 
     if (item.x < 0) {
       item.x = 0;
@@ -1398,6 +1920,10 @@ function update(delta) {
       item.vx = -Math.abs(item.vx || 0);
     }
 
+    if (absorbRainIntoWave(item, now)) {
+      return false;
+    }
+
     const intersectsPaddle =
       item.x + item.width > paddle.x &&
       item.x < paddle.x + paddle.width &&
@@ -1405,7 +1931,7 @@ function update(delta) {
       item.y < paddle.y + paddle.height;
 
     if (intersectsPaddle) {
-      if (item.kind === 'harm-drop' || item.kind === 'nuclear-drop' || item.kind === 'lava-drop') {
+      if (item.kind === 'harm-drop' || item.kind === 'nuclear-drop' || item.kind === 'lava-drop' || item.kind === 'rain-drop' || item.kind === 'acid-cloud' || item.kind === 'lava-meteor') {
         loseLife('Toxic drop hit! Life lost');
       } else if (item.kind === 'mushroom') {
         applyMushroomBoost(now);
@@ -1444,12 +1970,29 @@ function update(delta) {
       delete ball.nuclearBoostEndsAt;
     }
 
+    if (ball.handFrozenUntil && ball.handFrozenUntil > now) {
+      survivingBalls.push(ball);
+      return;
+    }
+
+    if (ball.deceptiveFrozen) {
+      if (currentPhase !== 5 || !deceptivePhase.targetBrick || !deceptivePhase.targetBrick.alive) {
+        ball.deceptiveFrozen = false;
+      } else {
+        ball.x = deceptivePhase.targetBrick.x + deceptivePhase.targetBrick.width / 2;
+        ball.y = deceptivePhase.targetBrick.y + deceptivePhase.targetBrick.height / 2;
+        survivingBalls.push(ball);
+        return;
+      }
+    }
+
     const waterSurfaceY = getWaterSurfaceY(now);
     const ballInWater = waterActive && ball.y + ball.radius >= waterSurfaceY;
-    const ballWaterFactor = ballInWater ? 0.6 : 1;
+    const ballWaterFactor = ballInWater ? getWaterSlowFactor(now) : 1;
+    const malignFactor = ball.malignBoostEndsAt && ball.malignBoostEndsAt > now ? 1.15 : 1;
 
-    ball.x += ball.vx * delta * ballWaterFactor;
-    ball.y += ball.vy * delta * ballWaterFactor;
+    ball.x += ball.vx * delta * ballWaterFactor * malignFactor;
+    ball.y += ball.vy * delta * ballWaterFactor * malignFactor;
 
     if (ball.x - ball.radius <= 0) {
       ball.x = ball.radius;
@@ -1471,6 +2014,10 @@ function update(delta) {
       ball.x - ball.radius <= paddle.x + paddle.width &&
       ball.vy > 0
     ) {
+      if (paddleBoostEndsAt > now) {
+        mushroomBounceStartedAt = now;
+        mushroomBounceUntil = now + 360;
+      }
       ball.y = paddle.y - ball.radius;
       const hitPosition = (ball.x - (paddle.x + paddle.width / 2)) / (paddle.width / 2);
       const speed = Math.max(phaseBallSpeed, Math.hypot(ball.vx, ball.vy));
@@ -1538,14 +2085,17 @@ function draw() {
   drawBricks();
   drawRadioactiveZones();
   drawRouletteAnimations();
+  drawEvilHands();
   drawFallingItems();
   drawGuns();
   drawBullets();
   drawTurretBullets();
+  drawGuessShots();
   drawTurrets();
   drawPaddle();
   drawBalls();
   drawHammerInventory();
+  drawDeceptiveHint();
   drawPhaseCountdownOverlay();
 }
 
@@ -1558,26 +2108,39 @@ function drawPaddle() {
     return;
   }
 
-  const stemWidth = paddle.width * 0.36;
-  const stemX = paddle.x + (paddle.width - stemWidth) / 2;
-  ctx.fillStyle = '#f8fafc';
-  ctx.fillRect(stemX, paddle.y + 4, stemWidth, paddle.height - 3);
+  const now = performance.now();
+  const bouncing = mushroomBounceUntil > now;
+  const bounceProgress = bouncing ? 1 - (mushroomBounceUntil - now) / Math.max(1, mushroomBounceUntil - mushroomBounceStartedAt) : 1;
+  const squash = bouncing ? 0.16 * Math.sin(Math.min(1, bounceProgress) * Math.PI) : 0;
 
-  ctx.fillStyle = '#ef4444';
+  const capWidth = paddle.width * (1 + squash * 0.25);
+  const capHeight = paddle.height * (1 - squash * 0.55);
+  const capX = paddle.x + (paddle.width - capWidth) / 2;
+  const capY = paddle.y + 2 + squash * 3;
+
+  const stemWidth = paddle.width * 0.28;
+  const stemX = paddle.x + (paddle.width - stemWidth) / 2;
+  ctx.fillStyle = '#fef3c7';
+  ctx.fillRect(stemX, paddle.y + 4, stemWidth, paddle.height - 2);
+
+  ctx.fillStyle = '#dc2626';
   ctx.beginPath();
-  ctx.ellipse(paddle.x + paddle.width / 2, paddle.y + 4, paddle.width / 2, paddle.height, 0, Math.PI, Math.PI * 2);
+  ctx.ellipse(capX + capWidth / 2, capY + 1, capWidth / 2, capHeight, 0, Math.PI, Math.PI * 2);
   ctx.fill();
 
   ctx.fillStyle = '#ffffff';
   ctx.beginPath();
-  ctx.arc(paddle.x + paddle.width * 0.32, paddle.y + 3, 2.5, 0, Math.PI * 2);
-  ctx.arc(paddle.x + paddle.width * 0.5, paddle.y + 1.5, 2, 0, Math.PI * 2);
-  ctx.arc(paddle.x + paddle.width * 0.68, paddle.y + 3, 2.5, 0, Math.PI * 2);
+  ctx.arc(capX + capWidth * 0.26, capY + 4, 2.4, 0, Math.PI * 2);
+  ctx.arc(capX + capWidth * 0.42, capY + 2.2, 2, 0, Math.PI * 2);
+  ctx.arc(capX + capWidth * 0.58, capY + 3, 2.1, 0, Math.PI * 2);
+  ctx.arc(capX + capWidth * 0.73, capY + 4.2, 2.5, 0, Math.PI * 2);
   ctx.fill();
 }
 
 function drawBalls() {
   balls.forEach((ball) => {
+    if (ball.deceptiveFrozen && currentPhase === 5) return;
+
     ctx.beginPath();
     ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
     ctx.fillStyle = (ball.nuclearBoostEndsAt && ball.nuclearBoostEndsAt > performance.now()) || ball.radioactive ? '#22c55e' : '#f8fafc';
@@ -1593,12 +2156,22 @@ function drawBalls() {
 }
 
 function drawBricks() {
+  const now = performance.now();
   bricks.forEach((brick) => {
     if (!brick.alive) return;
 
-    ctx.fillStyle = brick.color;
+    let brickColor = brick.color;
+    if (brick.type === 'deceptive') {
+      brickColor = '#7c3aed';
+      if (deceptivePhase.stage === 'locking') {
+        const blinkStep = Math.floor((now - deceptivePhase.stageStartedAt) / 250);
+        brickColor = blinkStep % 2 === 0 ? '#22c55e' : '#7c3aed';
+      }
+    }
+
+    ctx.fillStyle = brickColor;
     ctx.fillRect(brick.x, brick.y, brick.width, brick.height);
-    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.strokeStyle = brick.type === 'deceptive' ? '#000000' : 'rgba(255,255,255,0.4)';
     ctx.strokeRect(brick.x, brick.y, brick.width, brick.height);
 
     if (brick.type === 'boss-core') {
@@ -1641,15 +2214,18 @@ function drawBricks() {
       ctx.stroke();
       ctx.lineWidth = 1;
     } else if (brick.type === 'harm-drop') {
-      ctx.fillStyle = '#1e3a8a';
+      ctx.fillStyle = '#e0f2fe';
       ctx.beginPath();
-      ctx.moveTo(brick.x + brick.width / 2, brick.y + 6);
-      ctx.lineTo(brick.x + brick.width / 2 - 6, brick.y + 16);
-      ctx.lineTo(brick.x + brick.width / 2 + 6, brick.y + 16);
-      ctx.closePath();
+      ctx.arc(brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 1, 5, 0, Math.PI * 2);
+      ctx.arc(brick.x + brick.width / 2 - 2, brick.y + brick.height / 2 - 4, 6.5, 0, Math.PI * 2);
+      ctx.arc(brick.x + brick.width / 2 + 7, brick.y + brick.height / 2 - 1, 5.5, 0, Math.PI * 2);
+      ctx.arc(brick.x + brick.width / 2 + 13, brick.y + brick.height / 2 + 1, 4.2, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#dbeafe';
-      ctx.fillText('!', brick.x + brick.width / 2, brick.y + brick.height / 2 + 4);
+      ctx.fillStyle = '#38bdf8';
+      ctx.beginPath();
+      ctx.ellipse(brick.x + brick.width / 2 - 4, brick.y + brick.height / 2 + 7, 2.1, 3.6, 0, 0, Math.PI * 2);
+      ctx.ellipse(brick.x + brick.width / 2 + 3, brick.y + brick.height / 2 + 8, 2, 3.2, 0, 0, Math.PI * 2);
+      ctx.fill();
     } else if (brick.type === 'mushroom') {
       ctx.fillStyle = '#4a044e';
       ctx.beginPath();
@@ -1700,7 +2276,75 @@ function drawBricks() {
       }
       ctx.stroke();
       ctx.lineWidth = 1;
+    } else if (brick.type === 'evil') {
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(brick.x + 2, brick.y + 2, brick.width - 4, brick.height - 4);
+      ctx.fillStyle = '#dc2626';
+      ctx.beginPath();
+      ctx.moveTo(brick.x + brick.width / 2 - 13, brick.y + brick.height / 2 - 1);
+      ctx.lineTo(brick.x + brick.width / 2 - 4, brick.y + brick.height / 2 - 4);
+      ctx.lineTo(brick.x + brick.width / 2 - 4, brick.y + brick.height / 2 + 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(brick.x + brick.width / 2 + 13, brick.y + brick.height / 2 - 1);
+      ctx.lineTo(brick.x + brick.width / 2 + 4, brick.y + brick.height / 2 - 4);
+      ctx.lineTo(brick.x + brick.width / 2 + 4, brick.y + brick.height / 2 + 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#7f1d1d';
+      ctx.beginPath();
+      ctx.moveTo(brick.x + brick.width / 2 - 13, brick.y + brick.height / 2 - 5);
+      ctx.lineTo(brick.x + brick.width / 2 - 4, brick.y + brick.height / 2 - 7);
+      ctx.moveTo(brick.x + brick.width / 2 + 13, brick.y + brick.height / 2 - 5);
+      ctx.lineTo(brick.x + brick.width / 2 + 4, brick.y + brick.height / 2 - 7);
+      ctx.stroke();
     }
+  });
+}
+
+function drawEvilHands() {
+  evilHands.forEach((hand) => {
+    ctx.fillStyle = '#040404';
+    ctx.strokeStyle = '#dc2626';
+    ctx.lineWidth = 2;
+    const palmRadius = 8.5;
+    const centerX = hand.x + hand.width / 2;
+    const centerY = hand.y + hand.height * 0.56;
+
+    ctx.beginPath();
+    ctx.roundRect(hand.x + 4, hand.y + 11, hand.width - 8, hand.height - 11, 7);
+    ctx.fill();
+    ctx.stroke();
+
+    for (let i = 0; i < 4; i += 1) {
+      const fingerX = hand.x + 4 + i * 4.9;
+      ctx.beginPath();
+      ctx.roundRect(fingerX, hand.y + (i % 2 ? 0 : 1), 4, 17 - (i % 2), 3);
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = 'rgba(220, 38, 38, 0.24)';
+    ctx.beginPath();
+    ctx.ellipse(centerX, centerY + 1, palmRadius * 0.7, palmRadius * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#040404';
+
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, palmRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    if (hand.state === 'holding-paddle' || hand.state === 'holding-ball') {
+      ctx.strokeStyle = 'rgba(220, 38, 38, 0.8)';
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, palmRadius + 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.lineWidth = 1;
   });
 }
 
@@ -1767,13 +2411,14 @@ function drawWaterEffect() {
   const height = canvas.height - surfaceY;
   if (height <= 1) return;
 
+  const surge = isWaveSurgeActive(now);
   const gradient = ctx.createLinearGradient(0, surfaceY, 0, canvas.height);
-  gradient.addColorStop(0, 'rgba(56, 189, 248, 0.32)');
-  gradient.addColorStop(1, 'rgba(8, 47, 73, 0.62)');
+  gradient.addColorStop(0, surge ? 'rgba(45, 212, 191, 0.46)' : 'rgba(56, 189, 248, 0.32)');
+  gradient.addColorStop(1, surge ? 'rgba(6, 78, 59, 0.7)' : 'rgba(8, 47, 73, 0.62)');
   ctx.fillStyle = gradient;
   ctx.fillRect(0, surfaceY, canvas.width, height);
 
-  ctx.strokeStyle = 'rgba(186, 230, 253, 0.9)';
+  ctx.strokeStyle = surge ? 'rgba(110, 231, 183, 0.95)' : 'rgba(186, 230, 253, 0.9)';
   ctx.lineWidth = 2;
   ctx.beginPath();
   for (let x = 0; x <= canvas.width; x += 8) {
@@ -1833,7 +2478,7 @@ function drawTurretBullets() {
     ctx.beginPath();
     ctx.moveTo(bullet.x, bullet.y);
     ctx.lineTo(lineEndX, lineEndY);
-    ctx.strokeStyle = bullet.color || '#facc15';
+    ctx.strokeStyle = bullet.color || '#a855f7';
     ctx.lineWidth = 1.5;
     ctx.globalAlpha = 0.35;
     ctx.stroke();
@@ -1841,9 +2486,33 @@ function drawTurretBullets() {
 
     ctx.beginPath();
     ctx.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
-    ctx.fillStyle = bullet.color || '#facc15';
+    ctx.fillStyle = bullet.color || '#a855f7';
     ctx.fill();
   });
+}
+
+function drawGuessShots() {
+  guessShots.forEach((shot) => {
+    ctx.beginPath();
+    ctx.arc(shot.x, shot.y, shot.radius, 0, Math.PI * 2);
+    ctx.fillStyle = '#f8fafc';
+    ctx.fill();
+    ctx.strokeStyle = '#a855f7';
+    ctx.stroke();
+  });
+}
+
+function drawDeceptiveHint() {
+  if (currentPhase !== 5 || deceptivePhase.stage !== 'guess') return;
+
+  ctx.fillStyle = 'rgba(88, 28, 135, 0.78)';
+  ctx.fillRect(10, canvas.height - 48, 280, 32);
+  ctx.strokeStyle = '#d8b4fe';
+  ctx.strokeRect(10, canvas.height - 48, 280, 32);
+  ctx.fillStyle = '#f5d0fe';
+  ctx.font = 'bold 14px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('Press ARROW UP to shoot a block', 18, canvas.height - 27);
 }
 
 function drawTurrets() {
@@ -1888,6 +2557,80 @@ function drawHammerInventory() {
 
 function drawFallingItems() {
   fallingItems.forEach((item) => {
+    if (item.kind === 'rain-drop') {
+      ctx.fillStyle = item.color || '#7dd3fc';
+      ctx.beginPath();
+      ctx.moveTo(item.x + item.width / 2, item.y + 1);
+      ctx.bezierCurveTo(
+        item.x + item.width * 0.1,
+        item.y + item.height * 0.45,
+        item.x + item.width * 0.22,
+        item.y + item.height,
+        item.x + item.width / 2,
+        item.y + item.height
+      );
+      ctx.bezierCurveTo(
+        item.x + item.width * 0.78,
+        item.y + item.height,
+        item.x + item.width * 0.9,
+        item.y + item.height * 0.45,
+        item.x + item.width / 2,
+        item.y + 1
+      );
+      ctx.fill();
+      return;
+    }
+
+    if (item.kind === 'acid-cloud') {
+      ctx.fillStyle = item.color || '#84cc16';
+      ctx.beginPath();
+      ctx.arc(item.x + 5, item.y + 9, 4, 0, Math.PI * 2);
+      ctx.arc(item.x + 10, item.y + 8, 5, 0, Math.PI * 2);
+      ctx.arc(item.x + 14, item.y + 10, 3.8, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+
+    if (item.kind === 'lava-meteor') {
+      ctx.fillStyle = item.color || '#f97316';
+      ctx.beginPath();
+      ctx.arc(item.x + item.width / 2, item.y + item.height / 2, item.width * 0.42, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(item.x + item.width * 0.62, item.y + item.height * 0.42, item.width * 0.12, 0, Math.PI * 2);
+      ctx.arc(item.x + item.width * 0.42, item.y + item.height * 0.62, item.width * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+      const firePulse = 0.7 + Math.sin(performance.now() * 0.02 + item.x * 0.04) * 0.3;
+      ctx.strokeStyle = `rgba(251, 113, 47, ${0.65 + firePulse * 0.35})`;
+      ctx.beginPath();
+      ctx.moveTo(item.x + item.width * 0.28, item.y + item.height * 0.46);
+      ctx.lineTo(item.x - 10 - firePulse * 5, item.y + item.height * 0.14);
+      ctx.moveTo(item.x + item.width * 0.2, item.y + item.height * 0.62);
+      ctx.lineTo(item.x - 8 - firePulse * 4, item.y + item.height * 0.5);
+      ctx.moveTo(item.x + item.width * 0.34, item.y + item.height * 0.68);
+      ctx.lineTo(item.x - 7 - firePulse * 3, item.y + item.height * 0.72);
+      ctx.stroke();
+      return;
+    }
+
+    if (item.kind === 'nuclear-drop') {
+      const now = performance.now();
+      const pulse = 1 + Math.sin(now * 0.015 + item.x * 0.2) * 0.12;
+      const drift = Math.sin(now * 0.01 + item.y * 0.18) * 1.5;
+      ctx.fillStyle = item.color || '#22c55e';
+      ctx.beginPath();
+      ctx.arc(item.x + 5 + drift, item.y + 9, 4 * pulse, 0, Math.PI * 2);
+      ctx.arc(item.x + 10 + drift * 0.6, item.y + 8, 5 * pulse, 0, Math.PI * 2);
+      ctx.arc(item.x + 14 + drift, item.y + 10, 3.8 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#dcfce7';
+      ctx.beginPath();
+      ctx.arc(item.x + 10 + drift * 0.5, item.y + 8, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+
     if (item.kind === 'harm-drop' || item.kind === 'nuclear-drop' || item.kind === 'lava-drop') {
       ctx.fillStyle = item.color || (item.kind === 'nuclear-drop' ? '#22c55e' : item.kind === 'lava-drop' ? '#f97316' : '#60a5fa');
       ctx.beginPath();
@@ -1938,7 +2681,7 @@ function drawPhaseCountdownOverlay() {
   ctx.font = 'bold 42px Arial';
   ctx.fillText(`${remaining}`, canvas.width / 2, canvas.height / 2);
   ctx.font = 'bold 20px Arial';
-  ctx.fillText(`Phase ${currentPhase}`, canvas.width / 2, canvas.height / 2 + 40);
+  ctx.fillText(getPhaseTitle(), canvas.width / 2, canvas.height / 2 + 40);
 }
 
 function endGame(message) {
@@ -2120,6 +2863,13 @@ window.addEventListener('keydown', (event) => {
       startGame();
     }
   }
+
+  if (event.code === 'ArrowUp') {
+    if (gameState === 'running') {
+      event.preventDefault();
+      fireDeceptiveShot();
+    }
+  }
 });
 
 window.addEventListener('keyup', (event) => {
@@ -2179,6 +2929,32 @@ canvas.addEventListener('pointercancel', (event) => {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
+    const isLocalHost =
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1' ||
+      window.location.hostname === '::1';
+
+    if (isLocalHost) {
+      // Avoid stale files while testing locally.
+      navigator.serviceWorker
+        .getRegistrations()
+        .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+        .catch((error) => {
+          console.error('Service worker cleanup failed:', error);
+        });
+
+      if ('caches' in window) {
+        caches
+          .keys()
+          .then((cacheNames) => Promise.all(cacheNames.map((cacheName) => caches.delete(cacheName))))
+          .catch((error) => {
+            console.error('Cache cleanup failed:', error);
+          });
+      }
+
+      return;
+    }
+
     navigator.serviceWorker.register('./sw.js').catch((error) => {
       console.error('Service worker registration failed:', error);
     });
