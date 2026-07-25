@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Credit Card Bill Analyzer</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <h1>Credit Card Bill Analyzer</h1>
+      </header>
+
+      <section class="tabs" aria-label="View options">
+        <button class="tab" data-view="entries">By entry</button>
+        <button class="tab active" data-view="categories">By category</button>
+        <button class="tab" data-view="months">By month</button>
+        <button class="tab" data-view="bills">Bills</button>
+        <button class="tab" data-view="rules">Rules</button>
+      </section>
+
+      <section id="entries-view" class="view-panel">
+        <div class="controls">
+          <label for="category-filter" class="field-label">Filter by category</label>
+          <select id="category-filter">
+            <option value="all">All categories</option>
+            <option value="Food">Food</option>
+            <option value="Transport">Transport</option>
+            <option value="Groceries">Groceries</option>
+            <option value="Services">Services</option>
+            <option value="Travel">Travel</option>
+            <option value="Shopping">Shopping</option>
+            <option value="Healthcare">Healthcare</option>
+            <option value="School">School</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div class="table-wrapper">
+          <table id="entries-table" hidden>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Description</th>
+                <th class="sortable" data-sort="amount">Cost</th>
+                <th>Month</th>
+                <th>Card Company</th>
+                <th>Category</th>
+              </tr>
+            </thead>
+            <tbody id="entries-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="categories-view" class="view-panel" hidden>
+        <div class="table-wrapper">
+          <table id="categories-table" hidden>
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Month</th>
+                <th>Card Company</th>
+                <th class="sortable" data-sort="category-amount">Total cost</th>
+              </tr>
+            </thead>
+            <tbody id="categories-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="months-view" class="view-panel" hidden>
+        <div class="table-wrapper">
+          <table id="months-table" hidden>
+            <thead>
+              <tr>
+                <th>Month</th>
+                <th>Card Company</th>
+                <th class="sortable" data-sort="month-amount">Total cost</th>
+              </tr>
+            </thead>
+            <tbody id="months-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="bills-view" class="view-panel" hidden>
+        <div class="controls">
+          <label class="file-picker" for="pdf-input">
+            <span>Select PDF bill</span>
+            <input id="pdf-input" type="file" accept="application/pdf" />
+          </label>
+          <button id="parse-btn">Parse bill</button>
+        </div>
+        <div id="bills-status" class="status small">No saved bills yet.</div>
+        <div class="table-wrapper">
+          <table id="bills-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Company</th>
+                <th>Month</th>
+                <th>Entries</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="bills-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="rules-view" class="view-panel" hidden>
+        <form id="rules-form" class="rules-form">
+          <input id="rule-keyword" type="text" placeholder="Keyword or phrase" required />
+          <select id="rule-category">
+            <option value="Food">Food</option>
+            <option value="Transport">Transport</option>
+            <option value="Groceries">Groceries</option>
+            <option value="Services">Services</option>
+            <option value="Travel">Travel</option>
+            <option value="Shopping">Shopping</option>
+            <option value="Healthcare">Healthcare</option>
+            <option value="School">School</option>
+            <option value="Other">Other</option>
+          </select>
+          <button type="submit">Add rule</button>
+        </form>
+
+        <div class="rules-actions">
+          <button id="rerun-rules-btn" type="button">Re-run classification</button>
+        </div>
+
+        <div id="rules-status" class="status small">No custom rules yet.</div>
+        <div class="table-wrapper">
+          <table id="rules-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Category</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="rules-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Breakout Arcade</title>
+    <meta name="theme-color" content="#020617" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="icons/icon-192.svg" />
+    <link rel="apple-touch-icon" href="icons/icon-192.svg" />
+    <link rel="stylesheet" href="breakout.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Breakout Arcade</h1>
+          <p>Break every brick, keep the ball alive, and chase the top 10 scores.</p>
+        </div>
+        <div class="controls">
+          <button id="start-btn" type="button" class="accent">Start</button>
+          <button id="action-btn" type="button" class="mobile-action">Action</button>
+          <button id="pause-btn" type="button">Pause</button>
+          <button id="restart-btn" type="button">Restart</button>
+        </div>
+      </header>
+
+      <section class="game-layout">
+        <div class="game-card">
+          <canvas id="game-canvas" width="640" height="420"></canvas>
+          <p class="touch-hint">Touch and drag on the game area to move the platform.</p>
+          <div class="status-line">
+            <span id="status-display">Press Start to play</span>
+          </div>
+          <div class="status-bar">
+            <span id="score-display">Score: 0</span>
+            <span id="lives-display">Lives: 3</span>
+            <span id="phase-display">Phase 1</span>
+            <span id="effects-display">Effects: none</span>
+          </div>
+        </div>
+
+        <aside class="sidebar">
+          <h2>Top 20 Scores</h2>
+          <ol id="leaderboard-list" class="leaderboard"></ol>
+        </aside>
+      </section>
+    </main>
+
+    <div id="name-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="name-modal-title">
+      <div class="modal-card">
+        <h3 id="name-modal-title">Choose your name</h3>
+        <p>You made the top 20! Pick one of the names below.</p>
+        <div class="name-options">
+          <button type="button" class="name-option" data-name="Dante">Dante</button>
+          <button type="button" class="name-option" data-name="Dimitri">Dimitri</button>
+          <button type="button" class="name-option" data-name="Estêvão">Estêvão</button>
+          <button type="button" class="name-option" data-name="Fernanda">Fernanda</button>
+          <button type="button" class="name-option" data-name="Other">Other</button>
+        </div>
+        <div id="custom-name-row" class="custom-name-row hidden">
+          <input id="custom-name-input" type="text" placeholder="Enter another name" />
+          <button id="confirm-custom-name" type="button">Use name</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="breakout.js"></script>
+  </body>
+</html>
