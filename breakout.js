@@ -41,9 +41,13 @@ let fallingEmitters = [];
 let radioactiveZones = [];
 let turrets = [];
 let evilHands = [];
+let cowboyOutlaws = [];
+let cowboyBullets = [];
 let rouletteAnimations = [];
 let pendingRouletteEffects = [];
 let rouletteAnimationSeed = 1;
+let cowboyPairSequence = 1;
+let cowboyPairHitUntil = new Map();
 let guessShots = [];
 let deceptivePhase = {
   stage: 'idle',
@@ -73,6 +77,7 @@ let paddleBoostEndsAt = 0;
 let mushroomBounceUntil = 0;
 let mushroomBounceStartedAt = 0;
 let paddleSnaredUntil = 0;
+let paddleInvulnerableUntil = 0;
 let paddleOverdriveUntil = 0;
 let pausedAt = 0;
 let activePointerId = null;
@@ -134,6 +139,11 @@ function applySpecialType(brick, type) {
 
   if (type === 'evil') {
     brick.color = '#111111';
+    return;
+  }
+
+  if (type === 'cowboy') {
+    brick.color = '#d4b08a';
   }
 }
 
@@ -238,6 +248,10 @@ function shiftTimeBasedState(deltaMs) {
     paddleSnaredUntil += deltaMs;
   }
 
+  if (paddleInvulnerableUntil > 0) {
+    paddleInvulnerableUntil += deltaMs;
+  }
+
   if (paddleOverdriveUntil > 0) {
     paddleOverdriveUntil += deltaMs;
   }
@@ -247,6 +261,15 @@ function shiftTimeBasedState(deltaMs) {
     if (hand.releaseAt) hand.releaseAt += deltaMs;
     if (hand.disappearAt) hand.disappearAt += deltaMs;
   });
+
+  cowboyOutlaws.forEach((outlaw) => {
+    if (outlaw.nextShotAt) outlaw.nextShotAt += deltaMs;
+    if (outlaw.calmEndsAt) outlaw.calmEndsAt += deltaMs;
+  });
+
+  for (const [pairId, endsAt] of cowboyPairHitUntil.entries()) {
+    cowboyPairHitUntil.set(pairId, endsAt + deltaMs);
+  }
 
   balls.forEach((ball) => {
     if (ball.nuclearBoostEndsAt) {
@@ -687,6 +710,8 @@ function resetGame() {
   radioactiveZones = [];
   turrets = [];
   evilHands = [];
+  cowboyOutlaws = [];
+  cowboyBullets = [];
   guessShots = [];
   rouletteAnimations = [];
   pendingRouletteEffects = [];
@@ -696,6 +721,7 @@ function resetGame() {
   waterEffect.surgeUntil = 0;
   deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
   paddleSnaredUntil = 0;
+  paddleInvulnerableUntil = 0;
   paddleOverdriveUntil = 0;
   hammerCount = 0;
   minigunCharges = 0;
@@ -704,6 +730,8 @@ function resetGame() {
   autoLaunchAfterCountdown = false;
   awaitingServe = false;
   paddleBoostEndsAt = 0;
+  cowboyPairSequence = 1;
+  cowboyPairHitUntil = new Map();
   pauseButton.textContent = 'Pause';
   initializeRound();
   updateHud();
@@ -731,6 +759,8 @@ function initializeRound() {
   radioactiveZones = [];
   turrets = [];
   evilHands = [];
+  cowboyOutlaws = [];
+  cowboyBullets = [];
   guessShots = [];
   rouletteAnimations = [];
   pendingRouletteEffects = [];
@@ -740,6 +770,7 @@ function initializeRound() {
   waterEffect.surgeUntil = 0;
   deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
   paddleSnaredUntil = 0;
+  paddleInvulnerableUntil = 0;
   paddleOverdriveUntil = 0;
   turretBullets = [];
   fallingEmitters = [];
@@ -747,6 +778,8 @@ function initializeRound() {
   autoLaunchAfterCountdown = false;
   awaitingServe = false;
   paddleBoostEndsAt = 0;
+  cowboyPairSequence = 1;
+  cowboyPairHitUntil = new Map();
   resetWeaponCycle();
 }
 
@@ -769,6 +802,8 @@ function startGame() {
   radioactiveZones = [];
   turrets = [];
   evilHands = [];
+  cowboyOutlaws = [];
+  cowboyBullets = [];
   guessShots = [];
   rouletteAnimations = [];
   pendingRouletteEffects = [];
@@ -778,6 +813,7 @@ function startGame() {
   waterEffect.surgeUntil = 0;
   deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
   paddleSnaredUntil = 0;
+  paddleInvulnerableUntil = 0;
   paddleOverdriveUntil = 0;
   hammerCount = 0;
   minigunCharges = 0;
@@ -786,6 +822,8 @@ function startGame() {
   autoLaunchAfterCountdown = false;
   awaitingServe = false;
   paddleBoostEndsAt = 0;
+  cowboyPairSequence = 1;
+  cowboyPairHitUntil = new Map();
   initializeRound();
   launchBallRandom();
   updateHud();
@@ -809,6 +847,10 @@ function pickDistinctBrickIndices(candidates, count, blocked) {
 function applySpecialBricks(created) {
   const blocked = new Set();
   const allIndices = created.map((_, index) => index);
+
+  pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
+    applySpecialType(created[idx], 'cowboy');
+  });
 
   if (currentPhase % 2 === 1) {
     pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
@@ -903,10 +945,14 @@ function buildBricks() {
     ];
 
     const nonBossIndices = [0, 2, 3, 4, 5, 6, 7, 8];
-    const rainIndex = nonBossIndices[Math.floor(Math.random() * nonBossIndices.length)];
+    const cowboyIndex = nonBossIndices[Math.floor(Math.random() * nonBossIndices.length)];
+    applySpecialType(bossBlocks[cowboyIndex], 'cowboy');
+
+    const candidates = nonBossIndices.filter((index) => index !== cowboyIndex);
+    const rainIndex = candidates[Math.floor(Math.random() * candidates.length)];
     applySpecialType(bossBlocks[rainIndex], 'harm-drop');
 
-    const remaining = nonBossIndices.filter((index) => index !== rainIndex);
+    const remaining = candidates.filter((index) => index !== rainIndex);
     const rouletteIndex = remaining[Math.floor(Math.random() * remaining.length)];
     applySpecialType(bossBlocks[rouletteIndex], 'roulette');
 
@@ -993,6 +1039,8 @@ function startNextPhase() {
   radioactiveZones = [];
   turrets = [];
   evilHands = [];
+  cowboyOutlaws = [];
+  cowboyBullets = [];
   guessShots = [];
   rouletteAnimations = [];
   pendingRouletteEffects = [];
@@ -1002,6 +1050,7 @@ function startNextPhase() {
   waterEffect.surgeUntil = 0;
   deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
   paddleSnaredUntil = 0;
+  paddleInvulnerableUntil = 0;
   paddleOverdriveUntil = 0;
   turretBullets = [];
   fallingEmitters = [];
@@ -1023,6 +1072,8 @@ function startNextPhase() {
   phaseCountdownEndsAt = performance.now() + 3000;
   autoLaunchAfterCountdown = false;
   awaitingServe = false;
+  cowboyPairSequence = 1;
+  cowboyPairHitUntil = new Map();
   resetWeaponCycle();
   updateHud();
   statusDisplay.textContent = `${getPhaseTitle()} starts in 3...`;
@@ -1068,11 +1119,19 @@ function spawnDelayedExtraBall(originX, originY, sourceVx = 0, sourceVy = -phase
 }
 
 function loseLife(messageOnSurvive) {
+  const now = performance.now();
+  const ignoreInvulnerability = messageOnSurvive === 'Ball lost';
+
   if (gameState !== 'running') return true;
+
+  if (!ignoreInvulnerability && now < paddleInvulnerableUntil) {
+    return false;
+  }
 
   lives = Math.max(0, lives - 1);
   updateHud();
   bullets = [];
+  cowboyBullets = [];
   guessShots = [];
   fallingItems = [];
   paddle.width = paddle.baseWidth;
@@ -1084,9 +1143,187 @@ function loseLife(messageOnSurvive) {
   }
 
   balls = [createBall(paddle.x + paddle.width / 2, paddle.y - 14, 0, 0)];
+  paddleInvulnerableUntil = now + 2500;
   awaitingServe = true;
   statusDisplay.textContent = `${messageOnSurvive} — press Enter to continue`;
   return false;
+}
+
+function spawnCowboyOutlaw(brick, now = performance.now()) {
+  cowboyOutlaws.push({
+    x: brick.x + brick.width / 2,
+    y: brick.y + brick.height / 2,
+    radius: 18,
+    state: 'idle',
+    hits: 0,
+    nextShotAt: 0,
+    calmEndsAt: 0,
+    vy: 0
+  });
+  statusDisplay.textContent = 'Cowboy awakened: touch the red line to provoke him';
+}
+
+function fireCowboyPair(outlaw, now) {
+  const targetX = paddle.x + paddle.width / 2;
+  const targetY = paddle.y + paddle.height / 2;
+  const dx = targetX - outlaw.x;
+  const dy = targetY - outlaw.y;
+  const magnitude = Math.hypot(dx, dy) || 1;
+  const dirX = dx / magnitude;
+  const dirY = dy / magnitude;
+  const sideX = -dirY;
+  const sideY = dirX;
+  const speedModifier = currentPhase === 3 ? 0.85 : 1;
+  const speed = 3.5 * hazardBulletSpeedMultiplier * speedModifier;
+  const pairId = cowboyPairSequence;
+  cowboyPairSequence += 1;
+
+  const muzzleOffset = outlaw.radius + 5;
+  const sideOffset = 6;
+
+  cowboyBullets.push({
+    x: outlaw.x + dirX * muzzleOffset + sideX * sideOffset,
+    y: outlaw.y + dirY * muzzleOffset + sideY * sideOffset,
+    radius: 4,
+    vx: dirX * speed,
+    vy: dirY * speed,
+    color: '#ef4444',
+    pairId
+  });
+
+  cowboyBullets.push({
+    x: outlaw.x + dirX * muzzleOffset - sideX * sideOffset,
+    y: outlaw.y + dirY * muzzleOffset - sideY * sideOffset,
+    radius: 4,
+    vx: dirX * speed,
+    vy: dirY * speed,
+    color: '#ef4444',
+    pairId
+  });
+
+  outlaw.nextShotAt = now + 2000;
+}
+
+function updateCowboyOutlaws(now, delta) {
+  for (const [pairId, endsAt] of cowboyPairHitUntil.entries()) {
+    if (now >= endsAt) {
+      cowboyPairHitUntil.delete(pairId);
+    }
+  }
+
+  cowboyOutlaws = cowboyOutlaws.filter((outlaw) => {
+    if (outlaw.state === 'idle') {
+      if (paddle.x <= outlaw.x && paddle.x + paddle.width >= outlaw.x) {
+        outlaw.state = 'angry';
+        fireCowboyPair(outlaw, now);
+        statusDisplay.textContent = 'Cowboy enraged';
+      }
+      return true;
+    }
+
+    if (outlaw.state === 'angry') {
+      while (now >= outlaw.nextShotAt) {
+        fireCowboyPair(outlaw, now);
+      }
+      return true;
+    }
+
+    if (outlaw.state === 'cooldown') {
+      if (now >= outlaw.calmEndsAt) {
+        outlaw.state = 'falling';
+        outlaw.vy = 2.8;
+      }
+      return true;
+    }
+
+    if (outlaw.state === 'falling') {
+      outlaw.y += outlaw.vy * delta;
+      outlaw.vy = Math.min(8, outlaw.vy + 0.045 * delta);
+
+      const intersectsPaddle =
+        outlaw.x + outlaw.radius > paddle.x &&
+        outlaw.x - outlaw.radius < paddle.x + paddle.width &&
+        outlaw.y + outlaw.radius > paddle.y &&
+        outlaw.y - outlaw.radius < paddle.y + paddle.height;
+
+      if (intersectsPaddle) {
+        const spawnPoint = clampToCanvas(outlaw.x, paddle.y - 14, 8);
+        balls.push({
+          ...createBall(spawnPoint.x, spawnPoint.y, 0, 0),
+          cowboyDecor: true
+        });
+        statusDisplay.textContent = 'Cowboy joined as an extra ball';
+        return false;
+      }
+
+      if (outlaw.y - outlaw.radius > canvas.height + 24) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+function updateCowboyBullets(now, delta) {
+  cowboyBullets = cowboyBullets.filter((bullet) => {
+    bullet.x += bullet.vx * delta;
+    bullet.y += bullet.vy * delta;
+
+    if (
+      bullet.x + bullet.radius > paddle.x &&
+      bullet.x - bullet.radius < paddle.x + paddle.width &&
+      bullet.y + bullet.radius > paddle.y &&
+      bullet.y - bullet.radius < paddle.y + paddle.height
+    ) {
+      if (!cowboyPairHitUntil.has(bullet.pairId)) {
+        cowboyPairHitUntil.set(bullet.pairId, now + 1200);
+        loseLife('Cowboy shot! Life lost');
+      }
+      return false;
+    }
+
+    return (
+      bullet.x > -40 &&
+      bullet.x < canvas.width + 40 &&
+      bullet.y > -40 &&
+      bullet.y < canvas.height + 40
+    );
+  });
+}
+
+function hitCowboyOutlawWithBall(ball, outlaw, now) {
+  if (outlaw.state === 'falling') return false;
+
+  const dx = ball.x - outlaw.x;
+  const dy = ball.y - outlaw.y;
+  const distance = Math.hypot(dx, dy);
+  const minDistance = ball.radius + outlaw.radius;
+
+  if (distance >= minDistance) return false;
+
+  const safeDistance = Math.max(0.0001, distance);
+  const nx = dx / safeDistance;
+  const ny = dy / safeDistance;
+  const overlap = minDistance - distance + 0.4;
+  ball.x += nx * overlap;
+  ball.y += ny * overlap;
+
+  const speedDot = ball.vx * nx + ball.vy * ny;
+  ball.vx -= 2 * speedDot * nx;
+  ball.vy -= 2 * speedDot * ny;
+
+  if ((outlaw.state === 'angry' || outlaw.state === 'cooldown') && outlaw.hits < 3) {
+    outlaw.hits += 1;
+    if (outlaw.hits >= 3) {
+      outlaw.state = 'cooldown';
+      outlaw.calmEndsAt = now + 3000;
+      outlaw.nextShotAt = 0;
+      statusDisplay.textContent = 'Cowboy calmed down';
+    }
+  }
+
+  return true;
 }
 
 function spawnFallingItem(kind, x, y, color, vy = 2.2) {
@@ -1723,6 +1960,9 @@ function handleBrickCollision(ball, brick, previousBallX, previousBallY, spawned
     } else if (brick.type === 'evil') {
       spawnEvilHand(brick, now);
       statusDisplay.textContent = 'Evil hand summoned';
+    } else if (brick.type === 'cowboy') {
+      spawnCowboyOutlaw(brick, now);
+      statusDisplay.textContent = 'Cowboy transformed';
     } else if (brick.type === 'harm-drop') {
       spawnHarmRain(brick, now);
       statusDisplay.textContent = 'Watch out: rain storm';
@@ -1797,6 +2037,7 @@ function update(delta) {
   updateTimedDropEmitters(now);
   updateTurrets(now);
   updateEvilHands(now, delta);
+  updateCowboyOutlaws(now, delta);
   updateDeceptivePhase(now);
   updateDeceptiveGuessShots(now, delta);
 
@@ -1834,6 +2075,7 @@ function update(delta) {
 
   updateMobileWeapons(delta);
   updateWeaponFire(now);
+  updateCowboyBullets(now, delta);
 
   bullets = bullets.filter((bullet) => {
     if (gameState !== 'running') return false;
@@ -2035,6 +2277,10 @@ function update(delta) {
       }
     });
 
+    cowboyOutlaws.forEach((outlaw) => {
+      hitCowboyOutlawWithBall(ball, outlaw, now);
+    });
+
     for (const brick of bricks) {
       if (!brick.alive) continue;
 
@@ -2068,7 +2314,7 @@ function update(delta) {
     return;
   }
 
-  if (bricks.every((brick) => !brick.alive)) {
+  if (bricks.every((brick) => !brick.alive) && cowboyOutlaws.length === 0) {
     if (currentPhase < maxPhases) {
       startNextPhase();
       return;
@@ -2086,12 +2332,14 @@ function draw() {
 
   drawWaterEffect();
   drawBricks();
+  drawCowboyOutlaws();
   drawRadioactiveZones();
   drawRouletteAnimations();
   drawEvilHands();
   drawFallingItems();
   drawGuns();
   drawBullets();
+  drawCowboyBullets();
   drawTurretBullets();
   drawGuessShots();
   drawTurrets();
@@ -2104,6 +2352,24 @@ function draw() {
 
 function drawPaddle() {
   const isBoosted = paddleBoostEndsAt > performance.now();
+  const now = performance.now();
+  const invulnerableRemaining = Math.max(0, paddleInvulnerableUntil - now);
+
+  if (invulnerableRemaining > 0) {
+    ctx.fillStyle = '#1e3a8a';
+    ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
+    ctx.strokeStyle = '#93c5fd';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(paddle.x, paddle.y, paddle.width, paddle.height);
+    ctx.lineWidth = 1;
+
+    const seconds = (Math.ceil(invulnerableRemaining / 100) / 10).toFixed(1);
+    ctx.fillStyle = '#dbeafe';
+    ctx.font = 'bold 12px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(seconds, paddle.x + paddle.width / 2, paddle.y - 8);
+    return;
+  }
 
   if (!isBoosted) {
     ctx.fillStyle = '#38bdf8';
@@ -2111,7 +2377,6 @@ function drawPaddle() {
     return;
   }
 
-  const now = performance.now();
   const bouncing = mushroomBounceUntil > now;
   const bounceProgress = bouncing ? 1 - (mushroomBounceUntil - now) / Math.max(1, mushroomBounceUntil - mushroomBounceStartedAt) : 1;
   const squash = bouncing ? 0.16 * Math.sin(Math.min(1, bounceProgress) * Math.PI) : 0;
@@ -2144,16 +2409,23 @@ function drawBalls() {
   balls.forEach((ball) => {
     if (ball.deceptiveFrozen && currentPhase === 5) return;
 
+    const activeBoost = (ball.nuclearBoostEndsAt && ball.nuclearBoostEndsAt > performance.now()) || ball.radioactive;
     ctx.beginPath();
     ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
-    ctx.fillStyle = (ball.nuclearBoostEndsAt && ball.nuclearBoostEndsAt > performance.now()) || ball.radioactive ? '#22c55e' : '#f8fafc';
+    ctx.fillStyle = ball.cowboyDecor ? '#d6b38a' : activeBoost ? '#22c55e' : '#f8fafc';
     ctx.fill();
 
-    if ((ball.nuclearBoostEndsAt && ball.nuclearBoostEndsAt > performance.now()) || ball.radioactive) {
+    if (activeBoost) {
       ctx.strokeStyle = '#bbf7d0';
       ctx.lineWidth = 2;
       ctx.stroke();
       ctx.lineWidth = 1;
+    }
+
+    if (ball.cowboyDecor) {
+      drawCowboyHat(ball.x, ball.y - ball.radius - 2, 0.46);
+      drawCowboyRevolvers(ball.x, ball.y + 1, 0.42);
+      drawCowboyFace(ball.x, ball.y + 1, 4.8, 'happy');
     }
   });
 }
@@ -2302,7 +2574,99 @@ function drawBricks() {
       ctx.moveTo(brick.x + brick.width / 2 + 13, brick.y + brick.height / 2 - 5);
       ctx.lineTo(brick.x + brick.width / 2 + 4, brick.y + brick.height / 2 - 7);
       ctx.stroke();
+    } else if (brick.type === 'cowboy') {
+      const cx = brick.x + brick.width / 2;
+      const cy = brick.y + brick.height / 2 + 1;
+      ctx.fillStyle = '#d6b38a';
+      ctx.fillRect(brick.x + 2, brick.y + 2, brick.width - 4, brick.height - 4);
+      drawCowboyHat(cx, brick.y + 5, 0.8);
+      drawCowboyFace(cx, cy + 1, 8, 'happy');
     }
+  });
+}
+
+function getCowboyMood(outlaw) {
+  if (outlaw.state === 'idle') return 'happy';
+  if (outlaw.hits >= 3) return 'happy';
+  if (outlaw.hits === 2) return 'neutral';
+  if (outlaw.hits === 1) return 'less-angry';
+  return 'angry';
+}
+
+function drawCowboyHat(centerX, topY, scale = 1) {
+  ctx.fillStyle = '#7c3f12';
+  ctx.fillRect(centerX - 12 * scale, topY + 7 * scale, 24 * scale, 3 * scale);
+  ctx.fillStyle = '#92400e';
+  ctx.fillRect(centerX - 8 * scale, topY, 16 * scale, 8 * scale);
+  ctx.strokeStyle = '#f59e0b';
+  ctx.strokeRect(centerX - 8 * scale, topY, 16 * scale, 8 * scale);
+}
+
+function drawCowboyRevolvers(centerX, centerY, scale = 1) {
+  ctx.fillStyle = '#1f2937';
+  ctx.fillRect(centerX - 17 * scale, centerY + 1 * scale, 7 * scale, 3 * scale);
+  ctx.fillRect(centerX + 10 * scale, centerY + 1 * scale, 7 * scale, 3 * scale);
+  ctx.fillStyle = '#9ca3af';
+  ctx.fillRect(centerX - 12 * scale, centerY - 1 * scale, 3 * scale, 5 * scale);
+  ctx.fillRect(centerX + 9 * scale, centerY - 1 * scale, 3 * scale, 5 * scale);
+}
+
+function drawCowboyFace(centerX, centerY, radius, mood) {
+  const eyeY = centerY - radius * 0.22;
+  const leftEyeX = centerX - radius * 0.34;
+  const rightEyeX = centerX + radius * 0.34;
+
+  ctx.fillStyle = '#111827';
+  ctx.beginPath();
+  ctx.arc(leftEyeX, eyeY, 1.4, 0, Math.PI * 2);
+  ctx.arc(rightEyeX, eyeY, 1.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = '#111827';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  if (mood === 'angry') {
+    ctx.moveTo(centerX - radius * 0.46, centerY + radius * 0.36);
+    ctx.lineTo(centerX + radius * 0.46, centerY + radius * 0.2);
+    ctx.moveTo(leftEyeX - 3, eyeY - 3);
+    ctx.lineTo(leftEyeX + 2, eyeY - 5);
+    ctx.moveTo(rightEyeX - 2, eyeY - 5);
+    ctx.lineTo(rightEyeX + 3, eyeY - 3);
+  } else if (mood === 'less-angry') {
+    ctx.moveTo(centerX - radius * 0.4, centerY + radius * 0.33);
+    ctx.lineTo(centerX + radius * 0.4, centerY + radius * 0.26);
+  } else if (mood === 'neutral') {
+    ctx.moveTo(centerX - radius * 0.38, centerY + radius * 0.3);
+    ctx.lineTo(centerX + radius * 0.38, centerY + radius * 0.3);
+  } else {
+    ctx.arc(centerX, centerY + radius * 0.24, radius * 0.43, 0.08 * Math.PI, 0.92 * Math.PI);
+  }
+  ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+function drawCowboyOutlaws() {
+  cowboyOutlaws.forEach((outlaw) => {
+    if (outlaw.state !== 'falling') {
+      ctx.strokeStyle = 'rgba(220, 38, 38, 0.88)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(outlaw.x, outlaw.y + outlaw.radius);
+      ctx.lineTo(outlaw.x, canvas.height);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+
+    ctx.fillStyle = '#d6b38a';
+    ctx.beginPath();
+    ctx.arc(outlaw.x, outlaw.y, outlaw.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#92400e';
+    ctx.stroke();
+
+    drawCowboyHat(outlaw.x, outlaw.y - outlaw.radius - 8, 0.92);
+    drawCowboyRevolvers(outlaw.x, outlaw.y + 4, 0.8);
+    drawCowboyFace(outlaw.x, outlaw.y + 1, outlaw.radius * 0.52, getCowboyMood(outlaw));
   });
 }
 
@@ -2467,6 +2831,26 @@ function drawBullets() {
     ctx.beginPath();
     ctx.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
     ctx.fillStyle = bullet.color || '#fbbf24';
+    ctx.fill();
+  });
+}
+
+function drawCowboyBullets() {
+  cowboyBullets.forEach((bullet) => {
+    const magnitude = Math.hypot(bullet.vx, bullet.vy) || 1;
+    const lineEndX = bullet.x + (bullet.vx / magnitude) * 1200;
+    const lineEndY = bullet.y + (bullet.vy / magnitude) * 1200;
+
+    ctx.beginPath();
+    ctx.moveTo(bullet.x, bullet.y);
+    ctx.lineTo(lineEndX, lineEndY);
+    ctx.strokeStyle = 'rgba(248, 113, 113, 0.52)';
+    ctx.lineWidth = 1.35;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
+    ctx.fillStyle = bullet.color || '#ef4444';
     ctx.fill();
   });
 }
