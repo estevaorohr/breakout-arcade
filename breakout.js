@@ -11,6 +11,9 @@ const pauseButton = document.getElementById('pause-btn');
 const restartButton = document.getElementById('restart-btn');
 const leaderboardList = document.getElementById('leaderboard-list');
 
+const cowboyHatSprite = new Image();
+cowboyHatSprite.src = 'cowboy-hat.png';
+
 const STORAGE_KEY = 'breakout-top-scores';
 const MAX_LEADERBOARD_ENTRIES = 20;
 const brickRows = 4;
@@ -22,7 +25,9 @@ const brickOffsetTop = 40;
 const brickOffsetLeft = 24;
 const maxPhases = Number.POSITIVE_INFINITY;
 const baseBallSpeed = 4.8;
-const phaseGrowth = 1.07;
+const basePaddleSpeed = 7;
+const phaseGrowthEarly = 1.07;
+const phaseGrowthLate = 1.04;
 const hazardBulletSpeedMultiplier = 1.3;
 
 let score = 0;
@@ -38,6 +43,7 @@ let turretBullets = [];
 let balls = [];
 let fallingItems = [];
 let fallingEmitters = [];
+let waterImpacts = [];
 let radioactiveZones = [];
 let turrets = [];
 let evilHands = [];
@@ -63,7 +69,18 @@ let waterEffect = {
   startedAt: 0,
   riseDurationMs: 1200,
   levelRows: 7,
-  surgeUntil: 0
+  surgeUntil: 0,
+  rowsCurrent: 7,
+  rowsFrom: 7,
+  rowsTo: 7,
+  rowsTransitionStartedAt: 0,
+  rowsTransitionDurationMs: 650
+};
+let spotlightEffect = {
+  activeUntil: 0,
+  durationMs: 5000,
+  topHalfWidth: 27,
+  bottomHalfWidth: 180
 };
 let hammerCount = 0;
 let minigunCharges = 0;
@@ -78,20 +95,30 @@ let mushroomBounceUntil = 0;
 let mushroomBounceStartedAt = 0;
 let paddleSnaredUntil = 0;
 let paddleInvulnerableUntil = 0;
+let paddleShieldUntil = 0;
 let paddleOverdriveUntil = 0;
 let pausedAt = 0;
-let activePointerId = null;
-let activePointerStartX = 0;
-let activePointerStartY = 0;
-let activePointerStartAt = 0;
+let paddleFace = {
+  deadEyes: false,
+  nextBlinkAt: 0,
+  blinkUntil: 0
+};
 let paddle;
 let bricks = [];
 const keys = { ArrowLeft: false, ArrowRight: false };
 
-const SPECIAL_TYPES = ['extra-ball', 'double-hit', 'mushroom', 'hammer', 'extra-life', 'roulette', 'wave', 'evil'];
+const SPECIAL_TYPES = ['extra-ball', 'double-hit', 'mushroom', 'hammer', 'extra-life', 'roulette', 'wave', 'evil', 'meteor', 'shield'];
 
-function createBall(x, y, vx = 0, vy = 0) {
-  return { x, y, vx, vy, radius: 8 };
+const specialsModule = typeof BreakoutSpecials !== 'undefined' ? BreakoutSpecials : null;
+const cowboyRenderModule = typeof BreakoutCowboyRender !== 'undefined' ? BreakoutCowboyRender : null;
+const entitiesModule = typeof BreakoutEntities !== 'undefined' ? BreakoutEntities : null;
+const deceptiveModule = typeof BreakoutDeceptive !== 'undefined' ? BreakoutDeceptive : null;
+const drawEffectsModule = typeof BreakoutDrawEffects !== 'undefined' ? BreakoutDrawEffects : null;
+const leaderboardModule = typeof BreakoutLeaderboard !== 'undefined' ? BreakoutLeaderboard : null;
+const controlsModule = typeof BreakoutControls !== 'undefined' ? BreakoutControls : null;
+
+function createBall(x, y, vx = 0, vy = 0, radius = 8, speedFactor = 1) {
+  return { x, y, vx, vy, radius, speedFactor };
 }
 
 function applySpecialType(brick, type) {
@@ -144,6 +171,21 @@ function applySpecialType(brick, type) {
 
   if (type === 'cowboy') {
     brick.color = '#d4b08a';
+    return;
+  }
+
+  if (type === 'flashlight') {
+    brick.color = '#facc15';
+    return;
+  }
+
+  if (type === 'meteor') {
+    brick.color = '#f97316';
+    return;
+  }
+
+  if (type === 'shield') {
+    brick.color = '#1d4ed8';
   }
 }
 
@@ -151,13 +193,6 @@ function randomSpecialType(includeNuclear = true, includeExtraLife = true) {
   const base = includeExtraLife ? [...SPECIAL_TYPES] : SPECIAL_TYPES.filter((type) => type !== 'extra-life');
   const pool = includeNuclear ? [...base, 'nuclear'] : base;
   return pool[Math.floor(Math.random() * pool.length)];
-}
-
-function clampToCanvas(x, y, radius) {
-  return {
-    x: Math.max(radius, Math.min(canvas.width - radius, x)),
-    y: Math.max(radius, Math.min(canvas.height - radius, y))
-  };
 }
 
 function movePaddleByClientX(clientX) {
@@ -177,6 +212,11 @@ function movePaddleByClientX(clientX) {
 
 function triggerActionPower(now = performance.now()) {
   if (gameState !== 'running' || paused) return false;
+
+  if (currentPhase === 5) {
+    statusDisplay.textContent = 'Turrets are disabled in Phase 5';
+    return false;
+  }
 
   if (minigunCharges > 0) {
     return deployMinigun(now);
@@ -237,6 +277,9 @@ function shiftTimeBasedState(deltaMs) {
     if (waterEffect.surgeUntil > 0) {
       waterEffect.surgeUntil += deltaMs;
     }
+    if (waterEffect.rowsTransitionStartedAt > 0) {
+      waterEffect.rowsTransitionStartedAt += deltaMs;
+    }
   }
 
   if (deceptivePhase.stageEndsAt > 0) deceptivePhase.stageEndsAt += deltaMs;
@@ -252,8 +295,16 @@ function shiftTimeBasedState(deltaMs) {
     paddleInvulnerableUntil += deltaMs;
   }
 
+  if (paddleShieldUntil > 0) {
+    paddleShieldUntil += deltaMs;
+  }
+
   if (paddleOverdriveUntil > 0) {
     paddleOverdriveUntil += deltaMs;
+  }
+
+  if (spotlightEffect.activeUntil > 0) {
+    spotlightEffect.activeUntil += deltaMs;
   }
 
   evilHands.forEach((hand) => {
@@ -276,14 +327,46 @@ function shiftTimeBasedState(deltaMs) {
       ball.nuclearBoostEndsAt += deltaMs;
     }
   });
-}
 
-function getPhasePercent() {
-  return Math.round(phaseMultiplier * 100);
+  waterImpacts.forEach((impact) => {
+    impact.startedAt += deltaMs;
+    impact.endsAt += deltaMs;
+  });
 }
 
 function getPhaseTitle() {
   return currentPhase === 5 ? 'Fase Enganadora' : `Phase ${currentPhase}`;
+}
+
+function getPaddleInvulnerableUntil() {
+  return Math.max(paddleInvulnerableUntil, paddleShieldUntil);
+}
+
+function isPaddleInvulnerable(now = performance.now()) {
+  return now < getPaddleInvulnerableUntil();
+}
+
+function isSpotlightActive(now = performance.now()) {
+  return spotlightEffect.activeUntil > now;
+}
+
+function activateSpotlight(now = performance.now()) {
+  spotlightEffect.activeUntil = now + spotlightEffect.durationMs;
+  paddleOverdriveUntil = Math.max(paddleOverdriveUntil, now + spotlightEffect.durationMs);
+  statusDisplay.textContent = 'Flashlight active for 5s';
+}
+
+function getSpotlightGeometry() {
+  if (!paddle) return null;
+  const sourceX = paddle.x + paddle.width / 2;
+  const sourceY = paddle.y + paddle.height / 2;
+  return {
+    sourceX,
+    sourceY,
+    topY: 0,
+    topHalfWidth: spotlightEffect.topHalfWidth,
+    bottomHalfWidth: spotlightEffect.bottomHalfWidth
+  };
 }
 
 function isWaterEffectActive(now = performance.now()) {
@@ -299,9 +382,31 @@ function getWaterSlowFactor(now = performance.now()) {
   return isWaveSurgeActive(now) ? 0.4 : 0.6;
 }
 
-function getWaterTargetY() {
+function getWaterRows(now = performance.now()) {
+  if (waterEffect.rowsTransitionStartedAt > 0) {
+    const elapsed = now - waterEffect.rowsTransitionStartedAt;
+    const t = Math.max(0, Math.min(1, elapsed / waterEffect.rowsTransitionDurationMs));
+    waterEffect.rowsCurrent = waterEffect.rowsFrom + (waterEffect.rowsTo - waterEffect.rowsFrom) * t;
+    if (t >= 1) {
+      waterEffect.rowsTransitionStartedAt = 0;
+      waterEffect.rowsCurrent = waterEffect.rowsTo;
+    }
+  }
+
+  return waterEffect.rowsCurrent;
+}
+
+function setWaterRowsTarget(rows, now = performance.now()) {
+  const clampedRows = Math.max(1, rows);
+  const currentRows = getWaterRows(now);
+  waterEffect.rowsFrom = currentRows;
+  waterEffect.rowsTo = clampedRows;
+  waterEffect.rowsTransitionStartedAt = now;
+}
+
+function getWaterTargetY(now = performance.now()) {
   const platformHeight = paddle ? paddle.height : 14;
-  const rows = isWaveSurgeActive() ? waterEffect.levelRows * 2 : waterEffect.levelRows;
+  const rows = getWaterRows(now);
   const target = canvas.height - platformHeight * rows;
   return Math.max(brickOffsetTop + 12, Math.min(canvas.height - 24, target));
 }
@@ -311,7 +416,7 @@ function getWaterSurfaceY(now = performance.now()) {
     return canvas.height + 1;
   }
 
-  const targetY = getWaterTargetY();
+  const targetY = getWaterTargetY(now);
   const riseProgress = Math.max(0, Math.min(1, (now - waterEffect.startedAt) / waterEffect.riseDurationMs));
   return canvas.height - (canvas.height - targetY) * riseProgress;
 }
@@ -320,20 +425,31 @@ function activateWaterWave(now = performance.now()) {
   waterEffect.startedAt = now;
   waterEffect.activeUntil = now + 20000;
   waterEffect.surgeUntil = 0;
+  waterEffect.rowsCurrent = waterEffect.levelRows;
+  waterEffect.rowsFrom = waterEffect.levelRows;
+  waterEffect.rowsTo = waterEffect.levelRows;
+  waterEffect.rowsTransitionStartedAt = 0;
   statusDisplay.textContent = 'Wave activated: rising water for 20s';
 }
 
 function absorbRainIntoWave(item, now) {
   if (!isWaterEffectActive(now)) return false;
 
-  const rainyKinds = new Set(['rain-drop', 'acid-cloud', 'lava-meteor', 'nuclear-drop', 'harm-drop', 'lava-drop']);
-  if (!rainyKinds.has(item.kind)) return false;
+  const impactOnlyKinds = new Set(['lava-meteor', 'acid-cloud']);
+  const rainyKinds = new Set(['rain-drop', 'nuclear-drop', 'harm-drop', 'lava-drop']);
+  if (!impactOnlyKinds.has(item.kind) && !rainyKinds.has(item.kind)) return false;
 
   const surfaceY = getWaterSurfaceY(now);
   if (item.y + item.height < surfaceY) return false;
 
+  if (impactOnlyKinds.has(item.kind)) {
+    createWaterImpact(item, now);
+    return true;
+  }
+
   if (!isWaveSurgeActive(now)) {
     waterEffect.surgeUntil = now + 5000;
+    setWaterRowsTarget(waterEffect.levelRows * 2, now);
     statusDisplay.textContent = 'Wave surge! Water height doubled for 5s';
   }
 
@@ -341,9 +457,23 @@ function absorbRainIntoWave(item, now) {
   return true;
 }
 
+function createWaterImpact(item, now = performance.now()) {
+  const isMeteor = item.kind === 'lava-meteor';
+  waterImpacts.push({
+    kind: item.kind,
+    x: item.x + item.width / 2,
+    y: getWaterSurfaceY(now),
+    startedAt: now,
+    endsAt: now + 2000,
+    radius: isMeteor ? 24 : 20,
+    tint: isMeteor ? 'rgba(239, 68, 68, 0.52)' : 'rgba(34, 197, 94, 0.46)'
+  });
+}
+
 function updateEffectsDisplay(now = performance.now()) {
   const effects = [];
 
+  effects.push(`Paddle speed ${BreakoutUtils.toPercent(BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02))}%`);
   effects.push(`Hammers ${hammerCount}/3`);
   if (minigunCharges > 0) {
     effects.push(`Minigun ${minigunCharges}`);
@@ -388,6 +518,14 @@ function updateEffectsDisplay(now = performance.now()) {
 
   if (isWaterEffectActive(now)) {
     effects.push(`Water ${Math.ceil((waterEffect.activeUntil - now) / 1000)}s`);
+  }
+
+  if (isSpotlightActive(now)) {
+    effects.push(`Flashlight ${Math.ceil((spotlightEffect.activeUntil - now) / 1000)}s`);
+  }
+
+  if (paddleShieldUntil > now) {
+    effects.push(`Shield ${(Math.ceil((paddleShieldUntil - now) / 100) / 10).toFixed(1)}s`);
   }
 
   const activeTurret = turrets.filter((turret) => turret.endsAt > now);
@@ -707,6 +845,7 @@ function resetGame() {
   balls = [];
   fallingItems = [];
   fallingEmitters = [];
+  waterImpacts = [];
   radioactiveZones = [];
   turrets = [];
   evilHands = [];
@@ -719,9 +858,14 @@ function resetGame() {
   waterEffect.activeUntil = 0;
   waterEffect.startedAt = 0;
   waterEffect.surgeUntil = 0;
+  waterEffect.rowsCurrent = waterEffect.levelRows;
+  waterEffect.rowsFrom = waterEffect.levelRows;
+  waterEffect.rowsTo = waterEffect.levelRows;
+  waterEffect.rowsTransitionStartedAt = 0;
   deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
   paddleSnaredUntil = 0;
   paddleInvulnerableUntil = 0;
+  paddleShieldUntil = 0;
   paddleOverdriveUntil = 0;
   hammerCount = 0;
   minigunCharges = 0;
@@ -732,6 +876,8 @@ function resetGame() {
   paddleBoostEndsAt = 0;
   cowboyPairSequence = 1;
   cowboyPairHitUntil = new Map();
+  paddleFace = { deadEyes: false, nextBlinkAt: performance.now() + 2000, blinkUntil: 0 };
+  spotlightEffect.activeUntil = 0;
   pauseButton.textContent = 'Pause';
   initializeRound();
   updateHud();
@@ -746,7 +892,7 @@ function initializeRound() {
     height: 14,
     x: (canvas.width - 120) / 2,
     y: canvas.height - 28,
-    speed: 7
+    speed: basePaddleSpeed * BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02)
   };
 
   balls = [createBall(canvas.width / 2, paddle.y - 14, 0, 0)];
@@ -756,6 +902,7 @@ function initializeRound() {
   turretBullets = [];
   fallingItems = [];
   fallingEmitters = [];
+  waterImpacts = [];
   radioactiveZones = [];
   turrets = [];
   evilHands = [];
@@ -768,9 +915,14 @@ function initializeRound() {
   waterEffect.activeUntil = 0;
   waterEffect.startedAt = 0;
   waterEffect.surgeUntil = 0;
+  waterEffect.rowsCurrent = waterEffect.levelRows;
+  waterEffect.rowsFrom = waterEffect.levelRows;
+  waterEffect.rowsTo = waterEffect.levelRows;
+  waterEffect.rowsTransitionStartedAt = 0;
   deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
   paddleSnaredUntil = 0;
   paddleInvulnerableUntil = 0;
+  paddleShieldUntil = 0;
   paddleOverdriveUntil = 0;
   turretBullets = [];
   fallingEmitters = [];
@@ -780,6 +932,8 @@ function initializeRound() {
   paddleBoostEndsAt = 0;
   cowboyPairSequence = 1;
   cowboyPairHitUntil = new Map();
+  paddleFace = { deadEyes: false, nextBlinkAt: performance.now() + 2000, blinkUntil: 0 };
+  spotlightEffect.activeUntil = 0;
   resetWeaponCycle();
 }
 
@@ -799,6 +953,7 @@ function startGame() {
   balls = [];
   fallingItems = [];
   fallingEmitters = [];
+  waterImpacts = [];
   radioactiveZones = [];
   turrets = [];
   evilHands = [];
@@ -811,9 +966,14 @@ function startGame() {
   waterEffect.activeUntil = 0;
   waterEffect.startedAt = 0;
   waterEffect.surgeUntil = 0;
+  waterEffect.rowsCurrent = waterEffect.levelRows;
+  waterEffect.rowsFrom = waterEffect.levelRows;
+  waterEffect.rowsTo = waterEffect.levelRows;
+  waterEffect.rowsTransitionStartedAt = 0;
   deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
   paddleSnaredUntil = 0;
   paddleInvulnerableUntil = 0;
+  paddleShieldUntil = 0;
   paddleOverdriveUntil = 0;
   hammerCount = 0;
   minigunCharges = 0;
@@ -824,6 +984,7 @@ function startGame() {
   paddleBoostEndsAt = 0;
   cowboyPairSequence = 1;
   cowboyPairHitUntil = new Map();
+  spotlightEffect.activeUntil = 0;
   initializeRound();
   launchBallRandom();
   updateHud();
@@ -848,17 +1009,17 @@ function applySpecialBricks(created) {
   const blocked = new Set();
   const allIndices = created.map((_, index) => index);
 
-  pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
-    applySpecialType(created[idx], 'cowboy');
-  });
-
-  if (currentPhase % 2 === 1) {
+  if (currentPhase !== 3) {
     pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
-      applySpecialType(created[idx], 'nuclear');
+      applySpecialType(created[idx], 'cowboy');
     });
-  } else {
+  }
+
+  if (currentPhase !== 3) {
+    const atmosphericTypes = ['harm-drop', 'nuclear', 'meteor'];
+    const atmosphericType = atmosphericTypes[Math.floor(Math.random() * atmosphericTypes.length)];
     pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
-      applySpecialType(created[idx], 'harm-drop');
+      applySpecialType(created[idx], atmosphericType);
     });
   }
 
@@ -866,7 +1027,7 @@ function applySpecialBricks(created) {
     applySpecialType(created[idx], 'extra-ball');
   });
 
-  if (currentPhase % 2 === 1) {
+  if (currentPhase % 2 === 1 && currentPhase !== 3) {
     pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
       applySpecialType(created[idx], 'roulette');
     });
@@ -895,6 +1056,12 @@ function applySpecialBricks(created) {
   pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
     applySpecialType(created[idx], 'extra-life');
   });
+
+  if (currentPhase % 2 === 0) {
+    pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
+      applySpecialType(created[idx], 'shield');
+    });
+  }
 }
 
 function buildBricks() {
@@ -945,22 +1112,11 @@ function buildBricks() {
     ];
 
     const nonBossIndices = [0, 2, 3, 4, 5, 6, 7, 8];
-    const cowboyIndex = nonBossIndices[Math.floor(Math.random() * nonBossIndices.length)];
-    applySpecialType(bossBlocks[cowboyIndex], 'cowboy');
-
-    const candidates = nonBossIndices.filter((index) => index !== cowboyIndex);
-    const rainIndex = candidates[Math.floor(Math.random() * candidates.length)];
-    applySpecialType(bossBlocks[rainIndex], 'harm-drop');
-
-    const remaining = candidates.filter((index) => index !== rainIndex);
-    const rouletteIndex = remaining[Math.floor(Math.random() * remaining.length)];
-    applySpecialType(bossBlocks[rouletteIndex], 'roulette');
-
-    const remainingAfterRoulette = remaining.filter((index) => index !== rouletteIndex);
-    const evilIndex = remainingAfterRoulette[Math.floor(Math.random() * remainingAfterRoulette.length)];
+    const candidates = [...nonBossIndices];
+    const evilIndex = candidates[Math.floor(Math.random() * candidates.length)];
     applySpecialType(bossBlocks[evilIndex], 'evil');
 
-    const remainingAfterEvil = remainingAfterRoulette.filter((index) => index !== evilIndex);
+    const remainingAfterEvil = candidates.filter((index) => index !== evilIndex);
     const heartIndex = remainingAfterEvil[Math.floor(Math.random() * remainingAfterEvil.length)];
     applySpecialType(bossBlocks[heartIndex], 'extra-life');
 
@@ -1028,14 +1184,18 @@ function startNextPhase() {
     currentPhase = maxPhases;
   }
 
-  phaseMultiplier = Math.pow(phaseGrowth, currentPhase - 1);
+  phaseMultiplier = BreakoutUtils.getPhaseMultiplierFor(currentPhase, phaseGrowthEarly, phaseGrowthLate);
   phaseBallSpeed = baseBallSpeed * phaseMultiplier;
+  if (paddle) {
+    paddle.speed = basePaddleSpeed * BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02);
+  }
   bricks = buildBricks();
   guns = buildGuns();
   bullets = [];
   turretBullets = [];
   fallingItems = [];
   fallingEmitters = [];
+  waterImpacts = [];
   radioactiveZones = [];
   turrets = [];
   evilHands = [];
@@ -1048,9 +1208,14 @@ function startNextPhase() {
   waterEffect.activeUntil = 0;
   waterEffect.startedAt = 0;
   waterEffect.surgeUntil = 0;
+  waterEffect.rowsCurrent = waterEffect.levelRows;
+  waterEffect.rowsFrom = waterEffect.levelRows;
+  waterEffect.rowsTo = waterEffect.levelRows;
+  waterEffect.rowsTransitionStartedAt = 0;
   deceptivePhase = { stage: 'idle', targetBrick: null, capturedBall: null, stageStartedAt: 0, stageEndsAt: 0, nextSwapAt: 0, shuffleEndsAt: 0 };
   paddleSnaredUntil = 0;
   paddleInvulnerableUntil = 0;
+  paddleShieldUntil = 0;
   paddleOverdriveUntil = 0;
   turretBullets = [];
   fallingEmitters = [];
@@ -1061,7 +1226,8 @@ function startNextPhase() {
     balls.forEach((ball) => {
       const magnitude = Math.hypot(ball.vx, ball.vy) || 0;
       if (magnitude > 0) {
-        const scale = phaseBallSpeed / magnitude;
+        const targetSpeed = phaseBallSpeed * (ball.speedFactor || 1);
+        const scale = targetSpeed / magnitude;
         ball.vx *= scale;
         ball.vy *= scale;
       } else {
@@ -1074,14 +1240,15 @@ function startNextPhase() {
   awaitingServe = false;
   cowboyPairSequence = 1;
   cowboyPairHitUntil = new Map();
+  spotlightEffect.activeUntil = 0;
   resetWeaponCycle();
   updateHud();
-  statusDisplay.textContent = `${getPhaseTitle()} starts in 3...`;
+  statusDisplay.textContent = `${getPhaseTitle()} starts in 3... Paddle ${BreakoutUtils.toPercent(BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02))}%`;
 }
 
 function updateHud(now = performance.now()) {
   scoreDisplay.textContent = `Score: ${score}`;
-  phaseDisplay.textContent = `${getPhaseTitle()} • Speed ${getPhasePercent()}%`;
+  phaseDisplay.textContent = `${getPhaseTitle()} • Speed ${BreakoutUtils.toPercent(phaseMultiplier)}%`;
   livesDisplay.textContent = `Lives: ${lives}`;
   updateEffectsDisplay(now);
 }
@@ -1092,17 +1259,22 @@ function launchBallRandom(ball = balls[0]) {
   const angleMax = -50;
   const angleDeg = angleMin + Math.random() * (angleMax - angleMin);
   const angle = (angleDeg * Math.PI) / 180;
-  ball.vx = Math.cos(angle) * phaseBallSpeed;
-  ball.vy = Math.sin(angle) * phaseBallSpeed;
+  const speed = phaseBallSpeed * (ball.speedFactor || 1);
+  ball.vx = Math.cos(angle) * speed;
+  ball.vy = Math.sin(angle) * speed;
+  paddleFace.deadEyes = false;
+  paddleFace.blinkUntil = 0;
+  paddleFace.nextBlinkAt = performance.now() + 2000;
   awaitingServe = false;
 }
 
 function spawnExtraBallFrom(sourceBall, spawnedBalls) {
-  const speed = Math.hypot(sourceBall.vx, sourceBall.vy) || phaseBallSpeed;
+  const sourceSpeedFactor = sourceBall.speedFactor || 1;
+  const speed = Math.hypot(sourceBall.vx, sourceBall.vy) || phaseBallSpeed * sourceSpeedFactor;
   const mirroredVx = -sourceBall.vx || speed * 0.75;
   const vyDirection = sourceBall.vy <= 0 ? -1 : 1;
   const vyMagnitude = Math.sqrt(Math.max(1, speed * speed - mirroredVx * mirroredVx));
-  const extraBall = createBall(sourceBall.x, sourceBall.y, mirroredVx, vyMagnitude * vyDirection);
+  const extraBall = createBall(sourceBall.x, sourceBall.y, mirroredVx, vyMagnitude * vyDirection, sourceBall.radius || 8, sourceSpeedFactor);
   extraBall.radioactive = Boolean(sourceBall.radioactive);
   spawnedBalls.push(extraBall);
 }
@@ -1114,7 +1286,7 @@ function spawnDelayedExtraBall(originX, originY, sourceVx = 0, sourceVy = -phase
   const maxVx = speed * 0.92;
   vx = Math.max(-maxVx, Math.min(maxVx, vx));
   const vy = -Math.sqrt(Math.max(1, speed * speed - vx * vx));
-  const spawnPoint = clampToCanvas(originX, originY, 8);
+  const spawnPoint = BreakoutUtils.clampToCanvas(originX, originY, 8, canvas.width, canvas.height);
   balls.push(createBall(spawnPoint.x, spawnPoint.y, vx, vy));
 }
 
@@ -1124,11 +1296,12 @@ function loseLife(messageOnSurvive) {
 
   if (gameState !== 'running') return true;
 
-  if (!ignoreInvulnerability && now < paddleInvulnerableUntil) {
+  if (!ignoreInvulnerability && isPaddleInvulnerable(now)) {
     return false;
   }
 
   lives = Math.max(0, lives - 1);
+  paddleFace.deadEyes = true;
   updateHud();
   bullets = [];
   cowboyBullets = [];
@@ -1150,180 +1323,71 @@ function loseLife(messageOnSurvive) {
 }
 
 function spawnCowboyOutlaw(brick, now = performance.now()) {
-  cowboyOutlaws.push({
-    x: brick.x + brick.width / 2,
-    y: brick.y + brick.height / 2,
-    radius: 18,
-    state: 'idle',
-    hits: 0,
-    nextShotAt: 0,
-    calmEndsAt: 0,
-    vy: 0
-  });
+  if (!entitiesModule) return;
+  cowboyOutlaws.push(entitiesModule.spawnCowboyOutlaw(brick, now));
   statusDisplay.textContent = 'Cowboy awakened: touch the red line to provoke him';
 }
 
-function fireCowboyPair(outlaw, now) {
-  const targetX = paddle.x + paddle.width / 2;
-  const targetY = paddle.y + paddle.height / 2;
-  const dx = targetX - outlaw.x;
-  const dy = targetY - outlaw.y;
-  const magnitude = Math.hypot(dx, dy) || 1;
-  const dirX = dx / magnitude;
-  const dirY = dy / magnitude;
-  const sideX = -dirY;
-  const sideY = dirX;
-  const speedModifier = currentPhase === 3 ? 0.85 : 1;
-  const speed = 3.5 * hazardBulletSpeedMultiplier * speedModifier;
-  const pairId = cowboyPairSequence;
-  cowboyPairSequence += 1;
-
-  const muzzleOffset = outlaw.radius + 5;
-  const sideOffset = 6;
-
-  cowboyBullets.push({
-    x: outlaw.x + dirX * muzzleOffset + sideX * sideOffset,
-    y: outlaw.y + dirY * muzzleOffset + sideY * sideOffset,
-    radius: 4,
-    vx: dirX * speed,
-    vy: dirY * speed,
-    color: '#ef4444',
-    pairId
-  });
-
-  cowboyBullets.push({
-    x: outlaw.x + dirX * muzzleOffset - sideX * sideOffset,
-    y: outlaw.y + dirY * muzzleOffset - sideY * sideOffset,
-    radius: 4,
-    vx: dirX * speed,
-    vy: dirY * speed,
-    color: '#ef4444',
-    pairId
-  });
-
-  outlaw.nextShotAt = now + 2000;
-}
-
 function updateCowboyOutlaws(now, delta) {
-  for (const [pairId, endsAt] of cowboyPairHitUntil.entries()) {
-    if (now >= endsAt) {
-      cowboyPairHitUntil.delete(pairId);
+  if (!entitiesModule) return;
+
+  const state = {
+    cowboyPairHitUntil,
+    cowboyOutlaws,
+    cowboyBullets,
+    cowboyPairSequence,
+    paddle,
+    balls,
+    awaitingServe,
+    currentPhase,
+    hazardBulletSpeedMultiplier,
+    canvasWidth: canvas.width,
+    canvasHeight: canvas.height
+  };
+
+  entitiesModule.updateCowboyOutlaws(now, delta, state, {
+    clampToCanvas: BreakoutUtils.clampToCanvas,
+    createBall,
+    launchBallRandom,
+    setStatus: (text) => {
+      statusDisplay.textContent = text;
     }
-  }
-
-  cowboyOutlaws = cowboyOutlaws.filter((outlaw) => {
-    if (outlaw.state === 'idle') {
-      if (paddle.x <= outlaw.x && paddle.x + paddle.width >= outlaw.x) {
-        outlaw.state = 'angry';
-        fireCowboyPair(outlaw, now);
-        statusDisplay.textContent = 'Cowboy enraged';
-      }
-      return true;
-    }
-
-    if (outlaw.state === 'angry') {
-      while (now >= outlaw.nextShotAt) {
-        fireCowboyPair(outlaw, now);
-      }
-      return true;
-    }
-
-    if (outlaw.state === 'cooldown') {
-      if (now >= outlaw.calmEndsAt) {
-        outlaw.state = 'falling';
-        outlaw.vy = 2.8;
-      }
-      return true;
-    }
-
-    if (outlaw.state === 'falling') {
-      outlaw.y += outlaw.vy * delta;
-      outlaw.vy = Math.min(8, outlaw.vy + 0.045 * delta);
-
-      const intersectsPaddle =
-        outlaw.x + outlaw.radius > paddle.x &&
-        outlaw.x - outlaw.radius < paddle.x + paddle.width &&
-        outlaw.y + outlaw.radius > paddle.y &&
-        outlaw.y - outlaw.radius < paddle.y + paddle.height;
-
-      if (intersectsPaddle) {
-        const spawnPoint = clampToCanvas(outlaw.x, paddle.y - 14, 8);
-        balls.push({
-          ...createBall(spawnPoint.x, spawnPoint.y, 0, 0),
-          cowboyDecor: true
-        });
-        statusDisplay.textContent = 'Cowboy joined as an extra ball';
-        return false;
-      }
-
-      if (outlaw.y - outlaw.radius > canvas.height + 24) {
-        return false;
-      }
-    }
-
-    return true;
   });
+
+  cowboyPairHitUntil = state.cowboyPairHitUntil;
+  cowboyOutlaws = state.cowboyOutlaws;
+  cowboyBullets = state.cowboyBullets;
+  cowboyPairSequence = state.cowboyPairSequence;
+  balls = state.balls;
+  awaitingServe = state.awaitingServe;
 }
 
 function updateCowboyBullets(now, delta) {
-  cowboyBullets = cowboyBullets.filter((bullet) => {
-    bullet.x += bullet.vx * delta;
-    bullet.y += bullet.vy * delta;
+  if (!entitiesModule) return;
 
-    if (
-      bullet.x + bullet.radius > paddle.x &&
-      bullet.x - bullet.radius < paddle.x + paddle.width &&
-      bullet.y + bullet.radius > paddle.y &&
-      bullet.y - bullet.radius < paddle.y + paddle.height
-    ) {
-      if (!cowboyPairHitUntil.has(bullet.pairId)) {
-        cowboyPairHitUntil.set(bullet.pairId, now + 1200);
-        loseLife('Cowboy shot! Life lost');
-      }
-      return false;
-    }
+  const state = {
+    cowboyBullets,
+    cowboyPairHitUntil,
+    paddle,
+    canvasWidth: canvas.width,
+    canvasHeight: canvas.height
+  };
 
-    return (
-      bullet.x > -40 &&
-      bullet.x < canvas.width + 40 &&
-      bullet.y > -40 &&
-      bullet.y < canvas.height + 40
-    );
+  entitiesModule.updateCowboyBullets(now, delta, state, {
+    loseLife
   });
+
+  cowboyBullets = state.cowboyBullets;
+  cowboyPairHitUntil = state.cowboyPairHitUntil;
 }
 
 function hitCowboyOutlawWithBall(ball, outlaw, now) {
-  if (outlaw.state === 'falling') return false;
-
-  const dx = ball.x - outlaw.x;
-  const dy = ball.y - outlaw.y;
-  const distance = Math.hypot(dx, dy);
-  const minDistance = ball.radius + outlaw.radius;
-
-  if (distance >= minDistance) return false;
-
-  const safeDistance = Math.max(0.0001, distance);
-  const nx = dx / safeDistance;
-  const ny = dy / safeDistance;
-  const overlap = minDistance - distance + 0.4;
-  ball.x += nx * overlap;
-  ball.y += ny * overlap;
-
-  const speedDot = ball.vx * nx + ball.vy * ny;
-  ball.vx -= 2 * speedDot * nx;
-  ball.vy -= 2 * speedDot * ny;
-
-  if ((outlaw.state === 'angry' || outlaw.state === 'cooldown') && outlaw.hits < 3) {
-    outlaw.hits += 1;
-    if (outlaw.hits >= 3) {
-      outlaw.state = 'cooldown';
-      outlaw.calmEndsAt = now + 3000;
-      outlaw.nextShotAt = 0;
-      statusDisplay.textContent = 'Cowboy calmed down';
+  if (!entitiesModule) return false;
+  return entitiesModule.hitCowboyOutlawWithBall(ball, outlaw, now, {
+    setStatus: (text) => {
+      statusDisplay.textContent = text;
     }
-  }
-
-  return true;
+  });
 }
 
 function spawnFallingItem(kind, x, y, color, vy = 2.2) {
@@ -1405,258 +1469,93 @@ function spawnDropBurst(dropCount = 6) {
   }
 }
 
-function spawnEvilHand(brick, now = performance.now()) {
-  evilHands.push({
-    x: brick.x + brick.width / 2 - 18,
-    y: brick.y + brick.height,
-    width: 36,
-    height: 54,
-    vy: 2.625,
-    state: 'descending',
-    capturedBall: null,
-    canCatchBallAt: now + 800,
-    releaseAt: 0,
-    pauseUntil: 0,
-    disappearAt: 0
+function triggerSpecialEffect(type, context = {}) {
+  if (!specialsModule) return false;
+
+  return specialsModule.triggerSpecialEffect(type, context, {
+    phaseBallSpeed,
+    spawnExtraBallFrom,
+    spawnDelayedExtraBall,
+    activateRouletteEffect,
+    activateWaterWave,
+    spawnEvilHand,
+    spawnCowboyOutlaw,
+    spawnHarmRain,
+    detonateNuclearBrick,
+    applyNuclearBoost,
+    spawnLavaRain,
+    spawnFallingItem,
+    activateSpotlight,
+    setStatus: (text) => {
+      statusDisplay.textContent = text;
+    }
   });
 }
 
-function launchBallToRandomCorner(ball, now = performance.now()) {
-  if (!ball) return;
-
-  const margin = 26;
-  const corners = [
-    { x: margin, y: margin },
-    { x: canvas.width - margin, y: margin },
-    { x: margin, y: canvas.height * 0.52 },
-    { x: canvas.width - margin, y: canvas.height * 0.52 }
-  ];
-  const corner = corners[Math.floor(Math.random() * corners.length)];
-  ball.x = corner.x;
-  ball.y = corner.y;
-
-  const centerX = canvas.width / 2;
-  const centerY = canvas.height / 2;
-  const dx = centerX - ball.x;
-  const dy = centerY - ball.y;
-  const magnitude = Math.hypot(dx, dy) || 1;
-  const speed = phaseBallSpeed * 1.15;
-  let vx = (dx / magnitude) * speed;
-  let vy = (dy / magnitude) * speed;
-
-  // Keep launch angle at least 15 degrees away from the horizontal axis.
-  const minVertical = speed * Math.sin(Math.PI / 12);
-  if (Math.abs(vy) < minVertical) {
-    vy = Math.sign(vy || (Math.random() < 0.5 ? -1 : 1)) * minVertical;
-    const horizontal = Math.sqrt(Math.max(1, speed * speed - vy * vy));
-    vx = Math.sign(vx || (Math.random() < 0.5 ? -1 : 1)) * horizontal;
-  }
-
-  ball.vx = vx;
-  ball.vy = vy;
-  ball.malignBoostEndsAt = now + 3000;
+function spawnEvilHand(brick, now = performance.now()) {
+  if (!entitiesModule) return;
+  evilHands.push(entitiesModule.spawnEvilHand(brick, now));
 }
 
 function updateEvilHands(now, delta) {
-  if (!evilHands.length) return;
+  if (!entitiesModule) return;
 
-  evilHands = evilHands.filter((hand) => {
-    if (hand.disappearAt && now >= hand.disappearAt) {
-      return false;
+  const state = {
+    evilHands,
+    balls,
+    paddle,
+    phaseBallSpeed,
+    paddleOverdriveUntil,
+    paddleSnaredUntil,
+    canvasWidth: canvas.width,
+    canvasHeight: canvas.height
+  };
+
+  entitiesModule.updateEvilHands(now, delta, state, {
+    setStatus: (text) => {
+      statusDisplay.textContent = text;
     }
-
-    if (hand.state === 'holding-paddle') {
-      if (now >= hand.releaseAt) {
-        paddleOverdriveUntil = now + 10000;
-        hand.disappearAt = now;
-        return false;
-      }
-      hand.x = paddle.x + paddle.width / 2 - hand.width / 2;
-      hand.y = paddle.y - hand.height + 2;
-      return true;
-    }
-
-    if (hand.state === 'holding-ball') {
-      const ball = hand.capturedBall;
-      if (!ball) return false;
-
-      ball.x = hand.x + hand.width / 2;
-      ball.y = hand.y + hand.height * 0.55;
-      if (now >= hand.releaseAt) {
-        launchBallToRandomCorner(ball, now);
-        hand.disappearAt = now;
-        return false;
-      }
-      return true;
-    }
-
-    if (hand.state === 'waiting') {
-      const paddleOverlap =
-        hand.x + hand.width > paddle.x &&
-        hand.x < paddle.x + paddle.width &&
-        hand.y + hand.height > paddle.y &&
-        hand.y < paddle.y + paddle.height;
-
-      if (paddleOverlap) {
-        paddleSnaredUntil = now + 1000;
-        hand.state = 'holding-paddle';
-        hand.releaseAt = now + 1000;
-        hand.x = paddle.x + paddle.width / 2 - hand.width / 2;
-        hand.y = paddle.y - hand.height + 2;
-        statusDisplay.textContent = 'Evil hand trapped the paddle';
-        return true;
-      }
-
-      if (now >= hand.pauseUntil) {
-        return false;
-      }
-      return true;
-    }
-
-    hand.y += hand.vy * delta;
-
-    const paddleOverlap =
-      hand.x + hand.width > paddle.x &&
-      hand.x < paddle.x + paddle.width &&
-      hand.y + hand.height > paddle.y &&
-      hand.y < paddle.y + paddle.height;
-
-    if (paddleOverlap) {
-      paddleSnaredUntil = now + 1000;
-      hand.state = 'holding-paddle';
-      hand.releaseAt = now + 1000;
-      hand.x = paddle.x + paddle.width / 2 - hand.width / 2;
-      hand.y = paddle.y - hand.height + 2;
-      statusDisplay.textContent = 'Evil hand trapped the paddle';
-      return true;
-    }
-
-    const ball = now >= hand.canCatchBallAt ? balls.find((candidate) => {
-      if (!candidate) return false;
-      return (
-        candidate.x + candidate.radius > hand.x &&
-        candidate.x - candidate.radius < hand.x + hand.width &&
-        candidate.y + candidate.radius > hand.y &&
-        candidate.y - candidate.radius < hand.y + hand.height
-      );
-    }) : null;
-
-    if (ball) {
-      hand.state = 'holding-ball';
-      hand.capturedBall = ball;
-      hand.releaseAt = now + 2000;
-      ball.handFrozenUntil = hand.releaseAt;
-      statusDisplay.textContent = 'Evil hand grabbed the ball';
-      return true;
-    }
-
-    if (hand.y + hand.height >= paddle.y) {
-      hand.y = paddle.y - hand.height;
-      hand.state = 'waiting';
-      hand.pauseUntil = now + 3000;
-      return true;
-    }
-
-    return true;
   });
+
+  evilHands = state.evilHands;
+  balls = state.balls;
+  paddleOverdriveUntil = state.paddleOverdriveUntil;
+  paddleSnaredUntil = state.paddleSnaredUntil;
 }
 
 function resolveRouletteEffects(now = performance.now()) {
-  if (!pendingRouletteEffects.length) return;
+  if (!specialsModule) return;
 
-  const readyEffects = [];
-  pendingRouletteEffects = pendingRouletteEffects.filter((effect) => {
-    if (effect.executeAt <= now) {
-      readyEffects.push(effect);
-      return false;
+  const nextState = specialsModule.resolveRouletteEffects(
+    now,
+    {
+      pendingRouletteEffects,
+      rouletteAnimations
+    },
+    {
+      triggerSpecialEffect,
+      setStatus: (text) => {
+        statusDisplay.textContent = text;
+      }
     }
-    return true;
-  });
+  );
 
-  readyEffects.forEach((effect) => {
-    const brick = effect.sourceBrick;
-
-    const animation = rouletteAnimations.find((entry) => entry.id === effect.animationId);
-    const goodResult = Math.random() < 0.5;
-    if (animation) {
-      animation.resultColor = goodResult ? 'green' : 'red';
-      animation.rotation = Math.round(animation.rotation / Math.PI) * Math.PI;
-    }
-
-    let outcome;
-    if (goodResult) {
-      const goodRoll = Math.floor(Math.random() * 3);
-      outcome = goodRoll === 0 ? 'extra-life' : goodRoll === 1 ? 'hammer' : 'extra-ball';
-    } else {
-      const badRoll = Math.floor(Math.random() * 3);
-      outcome = badRoll === 0 ? 'acid-rain' : badRoll === 1 ? 'toxic-drops' : 'lava-rain';
-    }
-
-    if (outcome === 'extra-life') {
-      spawnFallingItem('heart', brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 9, '#f43f5e', 2.25);
-      statusDisplay.textContent = 'Roulette: extra life';
-      return;
-    }
-
-    if (outcome === 'hammer') {
-      spawnFallingItem('hammer', brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 9, '#f59e0b', 2.35);
-      statusDisplay.textContent = 'Roulette: hammer';
-      return;
-    }
-
-    if (outcome === 'extra-ball') {
-      spawnDelayedExtraBall(brick.x + brick.width / 2, brick.y + brick.height / 2, effect.sourceVx, effect.sourceVy);
-      statusDisplay.textContent = 'Roulette: extra ball';
-      return;
-    }
-
-    if (outcome === 'acid-rain') {
-      spawnAcidRain(brick, now);
-      statusDisplay.textContent = 'Roulette: acid rain';
-      return;
-    }
-
-    if (outcome === 'toxic-drops') {
-      spawnDropBurst(6);
-      statusDisplay.textContent = 'Roulette: toxic drops';
-      return;
-    }
-
-    spawnLavaRain(brick, now);
-    statusDisplay.textContent = 'Roulette: lava rain';
-  });
+  pendingRouletteEffects = nextState.pendingRouletteEffects;
+  rouletteAnimations = nextState.rouletteAnimations;
 }
 
 function activateRouletteEffect(ball, brick, spawnedBalls, now) {
-  const animationId = rouletteAnimationSeed;
-  rouletteAnimationSeed += 1;
+  if (!specialsModule) return;
 
-  rouletteAnimations.push({
-    id: animationId,
-    x: brick.x,
-    y: brick.y,
-    width: brick.width,
-    height: brick.height,
-    startedAt: now,
-    endsAt: now + 3000,
-    spinEndsAt: now + 2000,
-    resultColor: null,
-    rotation: 0
+  const nextState = specialsModule.activateRouletteEffect(ball, brick, spawnedBalls, now, {
+    rouletteAnimationSeed,
+    rouletteAnimations,
+    pendingRouletteEffects
   });
 
-  pendingRouletteEffects.push({
-    executeAt: now + 2000,
-    animationId,
-    sourceVx: ball.vx,
-    sourceVy: ball.vy,
-    sourceBrick: {
-      x: brick.x,
-      y: brick.y,
-      width: brick.width,
-      height: brick.height
-    }
-  });
-
+  rouletteAnimationSeed = nextState.rouletteAnimationSeed;
+  rouletteAnimations = nextState.rouletteAnimations;
+  pendingRouletteEffects = nextState.pendingRouletteEffects;
   statusDisplay.textContent = 'Roulette spinning...';
 }
 
@@ -1751,169 +1650,63 @@ function updateWeaponFire(now) {
 }
 
 function fireDeceptiveShot() {
-  if (currentPhase !== 5 || deceptivePhase.stage !== 'guess' || paused) return false;
-
-  guessShots.push({
-    x: paddle.x + paddle.width / 2,
-    y: paddle.y - 6,
-    radius: 4,
-    vy: -8
-  });
-  return true;
+  if (!deceptiveModule) return false;
+  const state = {
+    currentPhase,
+    deceptivePhase,
+    paused,
+    guessShots,
+    paddle
+  };
+  const fired = deceptiveModule.fireDeceptiveShot(state);
+  guessShots = state.guessShots;
+  return fired;
 }
 
 function beginDeceptiveSequence(ball, brick, now) {
-  deceptivePhase.stage = 'locking';
-  deceptivePhase.targetBrick = brick;
-  deceptivePhase.capturedBall = ball;
-  deceptivePhase.stageStartedAt = now;
-  deceptivePhase.stageEndsAt = now + 3000;
-  deceptivePhase.nextSwapAt = 0;
-  deceptivePhase.shuffleEndsAt = 0;
-  ball.deceptiveFrozen = true;
-  statusDisplay.textContent = 'Watch closely... the blocks will shuffle';
-}
-
-function startDeceptiveShuffle(now) {
-  deceptivePhase.stage = 'shuffling';
-  deceptivePhase.stageStartedAt = now;
-  deceptivePhase.nextSwapAt = now;
-  deceptivePhase.shuffleEndsAt = now + 15000;
-  statusDisplay.textContent = 'Shuffling! Follow where the ball is hidden';
-}
-
-function triggerDeceptiveSwap(now) {
-  const alive = bricks.filter((brick) => brick.alive && brick.type === 'deceptive');
-  if (alive.length < 2) return;
-
-  const first = alive[Math.floor(Math.random() * alive.length)];
-  let second = alive[Math.floor(Math.random() * alive.length)];
-  while (second === first && alive.length > 1) {
-    second = alive[Math.floor(Math.random() * alive.length)];
-  }
-
-  const firstStartX = first.x;
-  const firstStartY = first.y;
-  const secondStartX = second.x;
-  const secondStartY = second.y;
-
-  first.swapFromX = firstStartX;
-  first.swapFromY = firstStartY;
-  first.swapToX = secondStartX;
-  first.swapToY = secondStartY;
-  first.swapStartAt = now;
-  first.swapEndAt = now + 200;
-  first.swapArcDir = Math.random() < 0.5 ? -1 : 1;
-
-  second.swapFromX = secondStartX;
-  second.swapFromY = secondStartY;
-  second.swapToX = firstStartX;
-  second.swapToY = firstStartY;
-  second.swapStartAt = now;
-  second.swapEndAt = now + 200;
-  second.swapArcDir = -first.swapArcDir;
-}
-
-function updateDeceptiveBrickSwaps(now) {
-  bricks.forEach((brick) => {
-    if (!brick.swapEndAt) return;
-
-    const span = Math.max(1, brick.swapEndAt - brick.swapStartAt);
-    const t = Math.max(0, Math.min(1, (now - brick.swapStartAt) / span));
-    const arc = Math.sin(t * Math.PI) * 16 * (brick.swapArcDir || 1);
-    brick.x = brick.swapFromX + (brick.swapToX - brick.swapFromX) * t;
-    brick.y = brick.swapFromY + (brick.swapToY - brick.swapFromY) * t + arc;
-
-    if (now >= brick.swapEndAt) {
-      brick.x = brick.swapToX;
-      brick.y = brick.swapToY;
-      delete brick.swapFromX;
-      delete brick.swapFromY;
-      delete brick.swapToX;
-      delete brick.swapToY;
-      delete brick.swapStartAt;
-      delete brick.swapEndAt;
-      delete brick.swapArcDir;
+  if (!deceptiveModule) return;
+  const state = {
+    deceptivePhase
+  };
+  deceptiveModule.beginDeceptiveSequence(ball, brick, now, state, {
+    setStatus: (text) => {
+      statusDisplay.textContent = text;
     }
   });
 }
 
 function updateDeceptiveGuessShots(now, delta) {
-  if (currentPhase !== 5) {
-    guessShots = [];
-    return;
-  }
-
-  if (deceptivePhase.stage !== 'guess') {
-    guessShots = [];
-    return;
-  }
-
-  guessShots = guessShots.filter((shot) => {
-    shot.y += shot.vy * delta;
-    if (shot.y < -20) return false;
-
-    const hitBrick = bricks.find((brick) => {
-      if (!brick.alive || brick.type !== 'deceptive') return false;
-      return (
-        shot.x + shot.radius > brick.x &&
-        shot.x - shot.radius < brick.x + brick.width &&
-        shot.y + shot.radius > brick.y &&
-        shot.y - shot.radius < brick.y + brick.height
-      );
-    });
-
-    if (!hitBrick) return true;
-
-    if (hitBrick === deceptivePhase.targetBrick) {
-      statusDisplay.textContent = 'Correct block! Phase cleared';
-      bricks.forEach((brick) => {
-        if (brick.type === 'deceptive') brick.alive = false;
-      });
-      return false;
-    }
-
-    hitBrick.alive = false;
-    if (deceptivePhase.targetBrick && !deceptivePhase.targetBrick.alive) {
-      const aliveAlternatives = bricks.filter((brick) => brick.alive && brick.type === 'deceptive');
-      deceptivePhase.targetBrick = aliveAlternatives[Math.floor(Math.random() * aliveAlternatives.length)] || null;
-    }
-    lives = Math.max(0, lives - 1);
-    updateHud(now);
-    if (lives <= 0) {
-      endGame('Game over');
-      return false;
-    }
-    statusDisplay.textContent = 'Wrong block! You lost one life, try again';
-    return false;
+  if (!deceptiveModule) return;
+  const state = {
+    currentPhase,
+    deceptivePhase,
+    guessShots,
+    bricks,
+    lives
+  };
+  deceptiveModule.updateDeceptiveGuessShots(now, delta, state, {
+    setStatus: (text) => {
+      statusDisplay.textContent = text;
+    },
+    updateHud,
+    endGame
   });
+  guessShots = state.guessShots;
+  lives = state.lives;
 }
 
 function updateDeceptivePhase(now) {
-  if (currentPhase !== 5) return;
-
-  updateDeceptiveBrickSwaps(now);
-
-  if (deceptivePhase.capturedBall && deceptivePhase.targetBrick && deceptivePhase.targetBrick.alive) {
-    deceptivePhase.capturedBall.x = deceptivePhase.targetBrick.x + deceptivePhase.targetBrick.width / 2;
-    deceptivePhase.capturedBall.y = deceptivePhase.targetBrick.y + deceptivePhase.targetBrick.height / 2;
-  }
-
-  if (deceptivePhase.stage === 'locking' && now >= deceptivePhase.stageEndsAt) {
-    startDeceptiveShuffle(now);
-  }
-
-  if (deceptivePhase.stage === 'shuffling') {
-    while (now >= deceptivePhase.nextSwapAt && now < deceptivePhase.shuffleEndsAt) {
-      triggerDeceptiveSwap(now);
-      deceptivePhase.nextSwapAt += 200;
+  if (!deceptiveModule) return;
+  const state = {
+    currentPhase,
+    deceptivePhase,
+    bricks
+  };
+  deceptiveModule.updateDeceptivePhase(now, state, {
+    setStatus: (text) => {
+      statusDisplay.textContent = text;
     }
-
-    if (now >= deceptivePhase.shuffleEndsAt) {
-      deceptivePhase.stage = 'guess';
-      statusDisplay.textContent = 'Press Arrow Up to shoot the hidden block';
-    }
-  }
+  });
 }
 
 function handleBrickCollision(ball, brick, previousBallX, previousBallY, spawnedBalls, now) {
@@ -1925,12 +1718,7 @@ function handleBrickCollision(ball, brick, previousBallX, previousBallY, spawned
     return;
   }
 
-  if (brick.type === 'nuclear') {
-    score += Math.round(14 * phaseMultiplier);
-    updateHud(now);
-    detonateNuclearBrick(brick, now);
-    applyNuclearBoost(ball, now);
-  } else if (brick.type === 'boss-core') {
+  if (brick.type === 'boss-core') {
     brick.hits = (brick.hits || 0) + 1;
     score += Math.round(10 * phaseMultiplier);
     updateHud(now);
@@ -1947,35 +1735,18 @@ function handleBrickCollision(ball, brick, previousBallX, previousBallY, spawned
     updateHud(now);
   } else {
     brick.alive = false;
-    score += Math.round(10 * phaseMultiplier);
+    const basePoints = brick.type === 'nuclear' ? 14 : 10;
+    score += Math.round(basePoints * phaseMultiplier);
     updateHud(now);
 
-    if (brick.type === 'extra-ball') {
-      spawnExtraBallFrom(ball, spawnedBalls);
-      statusDisplay.textContent = 'Extra ball activated';
-    } else if (brick.type === 'roulette') {
-      activateRouletteEffect(ball, brick, spawnedBalls, now);
-    } else if (brick.type === 'wave') {
-      activateWaterWave(now);
-    } else if (brick.type === 'evil') {
-      spawnEvilHand(brick, now);
-      statusDisplay.textContent = 'Evil hand summoned';
-    } else if (brick.type === 'cowboy') {
-      spawnCowboyOutlaw(brick, now);
-      statusDisplay.textContent = 'Cowboy transformed';
-    } else if (brick.type === 'harm-drop') {
-      spawnHarmRain(brick, now);
-      statusDisplay.textContent = 'Watch out: rain storm';
-    } else if (brick.type === 'mushroom') {
-      spawnFallingItem('mushroom', brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 9, undefined, 2.2 * 1.38);
-      statusDisplay.textContent = 'Catch the mushroom power-up';
-    } else if (brick.type === 'hammer') {
-      spawnFallingItem('hammer', brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 9, '#f59e0b', 2.35);
-      statusDisplay.textContent = 'Catch the hammer power-up';
-    } else if (brick.type === 'extra-life') {
-      spawnFallingItem('heart', brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 9, '#f43f5e', 2.25);
-      statusDisplay.textContent = 'Catch the extra life heart';
-    }
+    triggerSpecialEffect(brick.type, {
+      now,
+      brick,
+      ball,
+      spawnedBalls,
+      sourceVx: ball.vx,
+      sourceVy: ball.vy
+    });
   }
 
   const previousLeft = previousBallX - ball.radius;
@@ -2012,28 +1783,25 @@ function handleBrickCollision(ball, brick, previousBallX, previousBallY, spawned
   }
 }
 
-function update(delta) {
-  if (gameState !== 'running' || paused) return;
+function handlePhaseCountdown(now) {
+  if (phaseCountdownEndsAt <= 0) return true;
 
-  const now = performance.now();
-  resolveRouletteEffects(now);
-  updateEffectsDisplay(now);
-
-  if (phaseCountdownEndsAt > 0) {
-    const remaining = Math.ceil((phaseCountdownEndsAt - now) / 1000);
-    if (remaining > 0) {
-      statusDisplay.textContent = `${getPhaseTitle()} starts in ${remaining}...`;
-      return;
-    }
-
-    phaseCountdownEndsAt = 0;
-    statusDisplay.textContent = `${getPhaseTitle()} — speed ${getPhasePercent()}%`;
-    if (autoLaunchAfterCountdown) {
-      launchBallRandom();
-      autoLaunchAfterCountdown = false;
-    }
+  const remaining = Math.ceil((phaseCountdownEndsAt - now) / 1000);
+  if (remaining > 0) {
+    statusDisplay.textContent = `${getPhaseTitle()} starts in ${remaining}... Paddle ${BreakoutUtils.toPercent(BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02))}%`;
+    return false;
   }
 
+  phaseCountdownEndsAt = 0;
+  statusDisplay.textContent = `${getPhaseTitle()} — ball ${BreakoutUtils.toPercent(phaseMultiplier)}% | paddle ${BreakoutUtils.toPercent(BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02))}%`;
+  if (autoLaunchAfterCountdown) {
+    launchBallRandom();
+    autoLaunchAfterCountdown = false;
+  }
+  return true;
+}
+
+function updatePreBallSystems(now, delta) {
   updateTimedDropEmitters(now);
   updateTurrets(now);
   updateEvilHands(now, delta);
@@ -2041,21 +1809,26 @@ function update(delta) {
   updateDeceptivePhase(now);
   updateDeceptiveGuessShots(now, delta);
 
+  if (isWaterEffectActive(now)) {
+    if (isWaveSurgeActive(now) && waterEffect.rowsTo < waterEffect.levelRows * 2) {
+      setWaterRowsTarget(waterEffect.levelRows * 2, now);
+    } else if (!isWaveSurgeActive(now) && waterEffect.rowsTo > waterEffect.levelRows) {
+      setWaterRowsTarget(waterEffect.levelRows, now);
+    }
+  }
+
   if (waterEffect.activeUntil > 0 && now >= waterEffect.activeUntil) {
     waterEffect.activeUntil = 0;
     waterEffect.startedAt = 0;
     waterEffect.surgeUntil = 0;
+    waterEffect.rowsCurrent = waterEffect.levelRows;
+    waterEffect.rowsFrom = waterEffect.levelRows;
+    waterEffect.rowsTo = waterEffect.levelRows;
+    waterEffect.rowsTransitionStartedAt = 0;
   }
+}
 
-  if (awaitingServe) {
-    const primaryBall = balls[0];
-    if (primaryBall) {
-      primaryBall.x = paddle.x + paddle.width / 2;
-      primaryBall.y = paddle.y - 14;
-    }
-    return;
-  }
-
+function updatePaddleMovementAndWeapons(now, delta) {
   if (paddleBoostEndsAt > 0 && now > paddleBoostEndsAt) {
     paddle.width = paddle.baseWidth;
     paddle.x = Math.max(0, Math.min(canvas.width - paddle.width, paddle.x));
@@ -2077,6 +1850,10 @@ function update(delta) {
   updateWeaponFire(now);
   updateCowboyBullets(now, delta);
 
+  return waterActive;
+}
+
+function updateProjectilesAndFallingItems(now, delta, waterActive) {
   bullets = bullets.filter((bullet) => {
     if (gameState !== 'running') return false;
 
@@ -2193,15 +1970,18 @@ function update(delta) {
         lives += 1;
         updateHud(now);
         statusDisplay.textContent = `Extra life gained (${lives})`;
+      } else if (item.kind === 'shield') {
+        paddleShieldUntil = now + 15000;
+        statusDisplay.textContent = 'Shield active for 15s';
       }
       return false;
     }
 
     return item.y < canvas.height + 20;
   });
+}
 
-  if (gameState !== 'running') return;
-
+function updateBallsAndPhaseProgression(now, delta, waterActive) {
   const survivingBalls = [];
   const spawnedBalls = [];
   let ballsLostThisFrame = 0;
@@ -2265,7 +2045,8 @@ function update(delta) {
       }
       ball.y = paddle.y - ball.radius;
       const hitPosition = (ball.x - (paddle.x + paddle.width / 2)) / (paddle.width / 2);
-      const speed = Math.max(phaseBallSpeed, Math.hypot(ball.vx, ball.vy));
+      const minBallSpeed = phaseBallSpeed * (ball.speedFactor || 1);
+      const speed = Math.max(minBallSpeed, Math.hypot(ball.vx, ball.vy));
       ball.vx = hitPosition * speed * 0.9;
       ball.vy = -Math.sqrt(Math.max(1, speed * speed - ball.vx * ball.vx));
     }
@@ -2311,17 +2092,48 @@ function update(delta) {
 
   if (ballsLostThisFrame > 0 && survivingBalls.length === 0 && spawnedBalls.length === 0 && gameState === 'running') {
     loseLife('Ball lost');
-    return;
+    return false;
   }
 
   if (bricks.every((brick) => !brick.alive) && cowboyOutlaws.length === 0) {
     if (currentPhase < maxPhases) {
       startNextPhase();
-      return;
+      return false;
     }
 
     endGame('You cleared the board!');
+    return false;
   }
+
+  return true;
+}
+
+function update(delta) {
+  if (gameState !== 'running' || paused) return;
+
+  const now = performance.now();
+  resolveRouletteEffects(now);
+  updateEffectsDisplay(now);
+
+  if (!handlePhaseCountdown(now)) return;
+
+  updatePreBallSystems(now, delta);
+
+  if (awaitingServe) {
+    const primaryBall = balls[0];
+    if (primaryBall) {
+      primaryBall.x = paddle.x + paddle.width / 2;
+      primaryBall.y = paddle.y - 14;
+    }
+    return;
+  }
+
+  const waterActive = updatePaddleMovementAndWeapons(now, delta);
+  updateProjectilesAndFallingItems(now, delta, waterActive);
+
+  if (gameState !== 'running') return;
+
+  updateBallsAndPhaseProgression(now, delta, waterActive);
 }
 
 function draw() {
@@ -2345,15 +2157,25 @@ function draw() {
   drawTurrets();
   drawPaddle();
   drawBalls();
+  drawWaterImpacts();
   drawHammerInventory();
+  drawSpotlightCone();
   drawDeceptiveHint();
   drawPhaseCountdownOverlay();
+}
+
+function drawSpotlightCone() {
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawSpotlightCone(ctx, canvas, {
+    isSpotlightActive,
+    getSpotlightGeometry
+  });
 }
 
 function drawPaddle() {
   const isBoosted = paddleBoostEndsAt > performance.now();
   const now = performance.now();
-  const invulnerableRemaining = Math.max(0, paddleInvulnerableUntil - now);
+  const invulnerableRemaining = Math.max(0, getPaddleInvulnerableUntil() - now);
 
   if (invulnerableRemaining > 0) {
     ctx.fillStyle = '#1e3a8a';
@@ -2368,12 +2190,25 @@ function drawPaddle() {
     ctx.font = 'bold 12px Arial';
     ctx.textAlign = 'center';
     ctx.fillText(seconds, paddle.x + paddle.width / 2, paddle.y - 8);
+    drawPaddleEyes(false);
+    return;
+  }
+
+  if (isSpotlightActive(now)) {
+    ctx.fillStyle = '#facc15';
+    ctx.fillRect(paddle.x + 8, paddle.y + 2, paddle.width - 16, paddle.height - 4);
+    ctx.fillStyle = '#92400e';
+    ctx.fillRect(paddle.x + paddle.width / 2 - 3, paddle.y + 3, 6, paddle.height - 6);
+    ctx.strokeStyle = '#fde68a';
+    ctx.strokeRect(paddle.x + 8, paddle.y + 2, paddle.width - 16, paddle.height - 4);
+    drawPaddleEyes(false);
     return;
   }
 
   if (!isBoosted) {
     ctx.fillStyle = '#38bdf8';
     ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
+    drawPaddleEyes(false);
     return;
   }
 
@@ -2403,6 +2238,81 @@ function drawPaddle() {
   ctx.arc(capX + capWidth * 0.58, capY + 3, 2.1, 0, Math.PI * 2);
   ctx.arc(capX + capWidth * 0.73, capY + 4.2, 2.5, 0, Math.PI * 2);
   ctx.fill();
+  drawPaddleEyes(true);
+}
+
+function drawPaddleEyes(isMushroom) {
+  const now = performance.now();
+  if (paddleFace.nextBlinkAt <= 0) {
+    paddleFace.nextBlinkAt = now + 2000;
+  }
+
+  if (!paddleFace.deadEyes && now >= paddleFace.nextBlinkAt) {
+    if (Math.random() < 0.5) {
+      paddleFace.blinkUntil = now + 140;
+    }
+    paddleFace.nextBlinkAt = now + 2000;
+  }
+
+  const eyeOffsetX = paddle.width * 0.19;
+  const eyeY = paddle.y + (isMushroom ? 6 : paddle.height / 2);
+  const leftEyeX = paddle.x + paddle.width / 2 - eyeOffsetX;
+  const rightEyeX = paddle.x + paddle.width / 2 + eyeOffsetX;
+  const eyeRadius = isMushroom ? 6.12 : 5.58;
+
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(leftEyeX, eyeY, eyeRadius, 0, Math.PI * 2);
+  ctx.arc(rightEyeX, eyeY, eyeRadius, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (paddleFace.deadEyes) {
+    ctx.strokeStyle = '#111827';
+    ctx.lineWidth = 1.4;
+    const xSize = eyeRadius * 0.85;
+    [leftEyeX, rightEyeX].forEach((x) => {
+      ctx.beginPath();
+      ctx.moveTo(x - xSize, eyeY - xSize);
+      ctx.lineTo(x + xSize, eyeY + xSize);
+      ctx.moveTo(x - xSize, eyeY + xSize);
+      ctx.lineTo(x + xSize, eyeY - xSize);
+      ctx.stroke();
+    });
+    ctx.lineWidth = 1;
+    return;
+  }
+
+  if (now < paddleFace.blinkUntil) {
+    ctx.strokeStyle = '#111827';
+    ctx.beginPath();
+    ctx.moveTo(leftEyeX - eyeRadius, eyeY);
+    ctx.lineTo(leftEyeX + eyeRadius, eyeY);
+    ctx.moveTo(rightEyeX - eyeRadius, eyeY);
+    ctx.lineTo(rightEyeX + eyeRadius, eyeY);
+    ctx.stroke();
+    return;
+  }
+
+  const target = balls.find((ball) => !ball.deceptiveFrozen) || balls[0];
+  const tx = target ? target.x : paddle.x + paddle.width / 2;
+  const ty = target ? target.y : paddle.y;
+  const pupilRadius = eyeRadius * 0.46;
+
+  function drawPupil(ex, ey) {
+    const dx = tx - ex;
+    const dy = ty - ey;
+    const magnitude = Math.hypot(dx, dy) || 1;
+    const travel = eyeRadius * 0.52;
+    const px = ex + (dx / magnitude) * Math.min(travel, magnitude);
+    const py = ey + (dy / magnitude) * Math.min(travel, magnitude);
+    ctx.fillStyle = '#111827';
+    ctx.beginPath();
+    ctx.arc(px, py, pupilRadius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  drawPupil(leftEyeX, eyeY);
+  drawPupil(rightEyeX, eyeY);
 }
 
 function drawBalls() {
@@ -2423,9 +2333,15 @@ function drawBalls() {
     }
 
     if (ball.cowboyDecor) {
-      drawCowboyHat(ball.x, ball.y - ball.radius - 2, 0.46);
-      drawCowboyRevolvers(ball.x, ball.y + 1, 0.42);
-      drawCowboyFace(ball.x, ball.y + 1, 4.8, 'happy');
+      const hatScale = Math.max(1.84, ball.radius * 0.102);
+      const spin = (performance.now() * 0.01 + ball.x * 0.03) % (Math.PI * 2);
+      drawCowboyHat(ball.x, ball.y - ball.radius - 6, hatScale);
+      drawCowboyRevolvers(ball.x, ball.y + 1, {
+        scale: Math.max(0.85, ball.radius * 0.07),
+        spread: ball.radius + 7,
+        spin
+      });
+      drawCowboyFace(ball.x, ball.y + 1, Math.max(4.8, ball.radius * 0.56), 'happy');
     }
   });
 }
@@ -2579,75 +2495,93 @@ function drawBricks() {
       const cy = brick.y + brick.height / 2 + 1;
       ctx.fillStyle = '#d6b38a';
       ctx.fillRect(brick.x + 2, brick.y + 2, brick.width - 4, brick.height - 4);
-      drawCowboyHat(cx, brick.y + 5, 0.8);
+      drawCowboyHat(cx, brick.y - 1, 1.6);
       drawCowboyFace(cx, cy + 1, 8, 'happy');
+    } else if (brick.type === 'flashlight') {
+      const cx = brick.x + brick.width / 2;
+      const cy = brick.y + brick.height / 2;
+      ctx.fillStyle = '#854d0e';
+      ctx.fillRect(cx - 3, cy - 4, 6, 10);
+      ctx.fillStyle = '#facc15';
+      ctx.fillRect(cx - 8, cy - 8, 16, 6);
+      ctx.fillStyle = 'rgba(253, 224, 71, 0.6)';
+      ctx.beginPath();
+      ctx.moveTo(cx - 7, cy - 2);
+      ctx.lineTo(cx + 7, cy - 2);
+      ctx.lineTo(cx + 15, cy + 9);
+      ctx.lineTo(cx - 15, cy + 9);
+      ctx.closePath();
+      ctx.fill();
+    } else if (brick.type === 'meteor') {
+      const cx = brick.x + brick.width / 2;
+      const cy = brick.y + brick.height / 2;
+      const meteorScale = 1.9;
+      const flamePulse = 0.75 + Math.sin(now * 0.02 + brick.x * 0.07) * 0.25;
+      ctx.fillStyle = '#f97316';
+      ctx.beginPath();
+      ctx.arc(cx, cy, 8 * meteorScale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#dc2626';
+      ctx.beginPath();
+      ctx.arc(cx + 2 * meteorScale, cy - 2 * meteorScale, 3 * meteorScale, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(251, 146, 60, ${0.65 + flamePulse * 0.25})`;
+      ctx.beginPath();
+      ctx.moveTo(cx - 6 * meteorScale, cy - 5 * meteorScale);
+      ctx.quadraticCurveTo(cx - 2 * meteorScale, cy - 13 * meteorScale - flamePulse * 3, cx, cy - 8 * meteorScale);
+      ctx.quadraticCurveTo(cx + 2 * meteorScale, cy - 14 * meteorScale - flamePulse * 3, cx + 6 * meteorScale, cy - 5 * meteorScale);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = `rgba(254, 215, 170, ${0.5 + flamePulse * 0.3})`;
+      ctx.beginPath();
+      ctx.moveTo(cx - 2.6 * meteorScale, cy - 6 * meteorScale);
+      ctx.quadraticCurveTo(cx, cy - 11 * meteorScale - flamePulse * 2.5, cx + 2.6 * meteorScale, cy - 6 * meteorScale);
+      ctx.closePath();
+      ctx.fill();
+    } else if (brick.type === 'shield') {
+      const cx = brick.x + brick.width / 2;
+      const cy = brick.y + brick.height / 2;
+      ctx.fillStyle = '#1d4ed8';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 9);
+      ctx.lineTo(cx + 9, cy - 3);
+      ctx.lineTo(cx + 6, cy + 8);
+      ctx.lineTo(cx, cy + 12);
+      ctx.lineTo(cx - 6, cy + 8);
+      ctx.lineTo(cx - 9, cy - 3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#bfdbfe';
+      ctx.stroke();
     }
   });
 }
 
 function getCowboyMood(outlaw) {
   if (outlaw.state === 'idle') return 'happy';
-  if (outlaw.hits >= 3) return 'happy';
-  if (outlaw.hits === 2) return 'neutral';
+  if (outlaw.hits >= 2) return 'happy';
   if (outlaw.hits === 1) return 'less-angry';
   return 'angry';
 }
 
 function drawCowboyHat(centerX, topY, scale = 1) {
-  ctx.fillStyle = '#7c3f12';
-  ctx.fillRect(centerX - 12 * scale, topY + 7 * scale, 24 * scale, 3 * scale);
-  ctx.fillStyle = '#92400e';
-  ctx.fillRect(centerX - 8 * scale, topY, 16 * scale, 8 * scale);
-  ctx.strokeStyle = '#f59e0b';
-  ctx.strokeRect(centerX - 8 * scale, topY, 16 * scale, 8 * scale);
+  if (!cowboyRenderModule) return;
+  cowboyRenderModule.drawCowboyHat(ctx, cowboyHatSprite, centerX, topY, scale);
 }
 
-function drawCowboyRevolvers(centerX, centerY, scale = 1) {
-  ctx.fillStyle = '#1f2937';
-  ctx.fillRect(centerX - 17 * scale, centerY + 1 * scale, 7 * scale, 3 * scale);
-  ctx.fillRect(centerX + 10 * scale, centerY + 1 * scale, 7 * scale, 3 * scale);
-  ctx.fillStyle = '#9ca3af';
-  ctx.fillRect(centerX - 12 * scale, centerY - 1 * scale, 3 * scale, 5 * scale);
-  ctx.fillRect(centerX + 9 * scale, centerY - 1 * scale, 3 * scale, 5 * scale);
+function drawCowboyRevolvers(centerX, centerY, options = {}) {
+  if (!cowboyRenderModule) return;
+  cowboyRenderModule.drawCowboyRevolvers(ctx, centerX, centerY, options);
 }
 
 function drawCowboyFace(centerX, centerY, radius, mood) {
-  const eyeY = centerY - radius * 0.22;
-  const leftEyeX = centerX - radius * 0.34;
-  const rightEyeX = centerX + radius * 0.34;
-
-  ctx.fillStyle = '#111827';
-  ctx.beginPath();
-  ctx.arc(leftEyeX, eyeY, 1.4, 0, Math.PI * 2);
-  ctx.arc(rightEyeX, eyeY, 1.4, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.strokeStyle = '#111827';
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  if (mood === 'angry') {
-    ctx.moveTo(centerX - radius * 0.46, centerY + radius * 0.36);
-    ctx.lineTo(centerX + radius * 0.46, centerY + radius * 0.2);
-    ctx.moveTo(leftEyeX - 3, eyeY - 3);
-    ctx.lineTo(leftEyeX + 2, eyeY - 5);
-    ctx.moveTo(rightEyeX - 2, eyeY - 5);
-    ctx.lineTo(rightEyeX + 3, eyeY - 3);
-  } else if (mood === 'less-angry') {
-    ctx.moveTo(centerX - radius * 0.4, centerY + radius * 0.33);
-    ctx.lineTo(centerX + radius * 0.4, centerY + radius * 0.26);
-  } else if (mood === 'neutral') {
-    ctx.moveTo(centerX - radius * 0.38, centerY + radius * 0.3);
-    ctx.lineTo(centerX + radius * 0.38, centerY + radius * 0.3);
-  } else {
-    ctx.arc(centerX, centerY + radius * 0.24, radius * 0.43, 0.08 * Math.PI, 0.92 * Math.PI);
-  }
-  ctx.stroke();
-  ctx.lineWidth = 1;
+  if (!cowboyRenderModule) return;
+  cowboyRenderModule.drawCowboyFace(ctx, centerX, centerY, radius, mood);
 }
 
 function drawCowboyOutlaws() {
   cowboyOutlaws.forEach((outlaw) => {
-    if (outlaw.state !== 'falling') {
+    if (outlaw.state === 'idle') {
       ctx.strokeStyle = 'rgba(220, 38, 38, 0.88)';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -2664,9 +2598,15 @@ function drawCowboyOutlaws() {
     ctx.strokeStyle = '#92400e';
     ctx.stroke();
 
-    drawCowboyHat(outlaw.x, outlaw.y - outlaw.radius - 8, 0.92);
-    drawCowboyRevolvers(outlaw.x, outlaw.y + 4, 0.8);
-    drawCowboyFace(outlaw.x, outlaw.y + 1, outlaw.radius * 0.52, getCowboyMood(outlaw));
+    const spinProgress = outlaw.gunSpinUntil > performance.now()
+      ? (performance.now() - (outlaw.gunSpinStartedAt || performance.now())) / 1000
+      : 0;
+    const spinAngle = outlaw.gunSpinUntil > performance.now() ? spinProgress * Math.PI * 4 : 0;
+
+    drawCowboyHat(outlaw.x, outlaw.y - outlaw.radius - 14, 1.84);
+    drawCowboyRevolvers(outlaw.x, outlaw.y + 5, { scale: 1.6, spread: outlaw.radius + 14, spin: spinAngle });
+    const faceRadius = outlaw.hits > 0 ? outlaw.radius * 0.72 : outlaw.radius * 0.58;
+    drawCowboyFace(outlaw.x, outlaw.y + 1, faceRadius, getCowboyMood(outlaw));
   });
 }
 
@@ -2801,92 +2741,33 @@ function drawWaterEffect() {
 }
 
 function drawGuns() {
-  guns.forEach((gun) => {
-    ctx.fillStyle = gun.color;
-    ctx.fillRect(gun.x, gun.y, gun.width, gun.height);
-
-    ctx.fillStyle = '#111827';
-    const barrelY = gun.y + gun.height / 2 - 2;
-    const barrelWidth = gun.kind === 'bazooka' ? 12 : 8;
-    ctx.fillRect(gun.x + gun.width - 2, barrelY, barrelWidth, 4);
-  });
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawGuns(ctx, guns);
 }
 
 function drawBullets() {
-  bullets.forEach((bullet) => {
-    const magnitude = Math.hypot(bullet.vx, bullet.vy) || 1;
-    const lineLength = 1200;
-    const lineEndX = bullet.x + (bullet.vx / magnitude) * lineLength;
-    const lineEndY = bullet.y + (bullet.vy / magnitude) * lineLength;
-
-    ctx.beginPath();
-    ctx.moveTo(bullet.x, bullet.y);
-    ctx.lineTo(lineEndX, lineEndY);
-    ctx.strokeStyle = bullet.color || '#fbbf24';
-    ctx.lineWidth = 1.5;
-    ctx.globalAlpha = 0.35;
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-
-    ctx.beginPath();
-    ctx.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
-    ctx.fillStyle = bullet.color || '#fbbf24';
-    ctx.fill();
-  });
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawBullets(ctx, bullets);
 }
 
 function drawCowboyBullets() {
-  cowboyBullets.forEach((bullet) => {
-    const magnitude = Math.hypot(bullet.vx, bullet.vy) || 1;
-    const lineEndX = bullet.x + (bullet.vx / magnitude) * 1200;
-    const lineEndY = bullet.y + (bullet.vy / magnitude) * 1200;
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawCowboyBullets(ctx, cowboyBullets);
+}
 
-    ctx.beginPath();
-    ctx.moveTo(bullet.x, bullet.y);
-    ctx.lineTo(lineEndX, lineEndY);
-    ctx.strokeStyle = 'rgba(248, 113, 113, 0.52)';
-    ctx.lineWidth = 1.35;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
-    ctx.fillStyle = bullet.color || '#ef4444';
-    ctx.fill();
-  });
+function drawWaterImpacts() {
+  if (!drawEffectsModule) return;
+  waterImpacts = drawEffectsModule.drawWaterImpacts(ctx, waterImpacts);
 }
 
 function drawTurretBullets() {
-  turretBullets.forEach((bullet) => {
-    const magnitude = Math.hypot(bullet.vx, bullet.vy) || 1;
-    const lineLength = 1200;
-    const lineEndX = bullet.x + (bullet.vx / magnitude) * lineLength;
-    const lineEndY = bullet.y + (bullet.vy / magnitude) * lineLength;
-
-    ctx.beginPath();
-    ctx.moveTo(bullet.x, bullet.y);
-    ctx.lineTo(lineEndX, lineEndY);
-    ctx.strokeStyle = bullet.color || '#a855f7';
-    ctx.lineWidth = 1.5;
-    ctx.globalAlpha = 0.35;
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-
-    ctx.beginPath();
-    ctx.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
-    ctx.fillStyle = bullet.color || '#a855f7';
-    ctx.fill();
-  });
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawTurretBullets(ctx, turretBullets);
 }
 
 function drawGuessShots() {
-  guessShots.forEach((shot) => {
-    ctx.beginPath();
-    ctx.arc(shot.x, shot.y, shot.radius, 0, Math.PI * 2);
-    ctx.fillStyle = '#f8fafc';
-    ctx.fill();
-    ctx.strokeStyle = '#a855f7';
-    ctx.stroke();
-  });
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawGuessShots(ctx, guessShots);
 }
 
 function drawDeceptiveHint() {
@@ -2912,163 +2793,20 @@ function drawTurrets() {
 }
 
 function drawHammerInventory() {
-  const size = 16;
-  const gap = 8;
-  const startX = canvas.width - (size + gap) * 3 - 12;
-  const y = 10;
-
-  for (let i = 0; i < 3; i += 1) {
-    const x = startX + i * (size + gap);
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.strokeRect(x, y, size, size);
-
-    if (i >= hammerCount) continue;
-
-    ctx.fillStyle = '#fef3c7';
-    ctx.fillRect(x + 7, y + 6, 2, 7);
-    ctx.fillStyle = '#92400e';
-    ctx.fillRect(x + 3, y + 4, 10, 3);
-  }
-
-  if (minigunCharges > 0) {
-    ctx.fillStyle = '#fde047';
-    ctx.fillRect(startX - 30, y + 3, 16, 10);
-    ctx.fillStyle = '#111827';
-    ctx.fillRect(startX - 35, y + 6, 8, 4);
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 11px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText(`x${minigunCharges}`, startX - 11, y + 12);
-  }
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawHammerInventory(ctx, canvas, hammerCount, minigunCharges);
 }
 
 function drawFallingItems() {
-  fallingItems.forEach((item) => {
-    if (item.kind === 'rain-drop') {
-      ctx.fillStyle = item.color || '#7dd3fc';
-      ctx.beginPath();
-      ctx.moveTo(item.x + item.width / 2, item.y + 1);
-      ctx.bezierCurveTo(
-        item.x + item.width * 0.1,
-        item.y + item.height * 0.45,
-        item.x + item.width * 0.22,
-        item.y + item.height,
-        item.x + item.width / 2,
-        item.y + item.height
-      );
-      ctx.bezierCurveTo(
-        item.x + item.width * 0.78,
-        item.y + item.height,
-        item.x + item.width * 0.9,
-        item.y + item.height * 0.45,
-        item.x + item.width / 2,
-        item.y + 1
-      );
-      ctx.fill();
-      return;
-    }
-
-    if (item.kind === 'acid-cloud') {
-      ctx.fillStyle = item.color || '#84cc16';
-      ctx.beginPath();
-      ctx.arc(item.x + 5, item.y + 9, 4, 0, Math.PI * 2);
-      ctx.arc(item.x + 10, item.y + 8, 5, 0, Math.PI * 2);
-      ctx.arc(item.x + 14, item.y + 10, 3.8, 0, Math.PI * 2);
-      ctx.fill();
-      return;
-    }
-
-    if (item.kind === 'lava-meteor') {
-      ctx.fillStyle = item.color || '#f97316';
-      ctx.beginPath();
-      ctx.arc(item.x + item.width / 2, item.y + item.height / 2, item.width * 0.42, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#ef4444';
-      ctx.beginPath();
-      ctx.arc(item.x + item.width * 0.62, item.y + item.height * 0.42, item.width * 0.12, 0, Math.PI * 2);
-      ctx.arc(item.x + item.width * 0.42, item.y + item.height * 0.62, item.width * 0.1, 0, Math.PI * 2);
-      ctx.fill();
-      const firePulse = 0.7 + Math.sin(performance.now() * 0.02 + item.x * 0.04) * 0.3;
-      ctx.strokeStyle = `rgba(251, 113, 47, ${0.65 + firePulse * 0.35})`;
-      ctx.beginPath();
-      ctx.moveTo(item.x + item.width * 0.28, item.y + item.height * 0.46);
-      ctx.lineTo(item.x - 10 - firePulse * 5, item.y + item.height * 0.14);
-      ctx.moveTo(item.x + item.width * 0.2, item.y + item.height * 0.62);
-      ctx.lineTo(item.x - 8 - firePulse * 4, item.y + item.height * 0.5);
-      ctx.moveTo(item.x + item.width * 0.34, item.y + item.height * 0.68);
-      ctx.lineTo(item.x - 7 - firePulse * 3, item.y + item.height * 0.72);
-      ctx.stroke();
-      return;
-    }
-
-    if (item.kind === 'nuclear-drop') {
-      const now = performance.now();
-      const pulse = 1 + Math.sin(now * 0.015 + item.x * 0.2) * 0.12;
-      const drift = Math.sin(now * 0.01 + item.y * 0.18) * 1.5;
-      ctx.fillStyle = item.color || '#22c55e';
-      ctx.beginPath();
-      ctx.arc(item.x + 5 + drift, item.y + 9, 4 * pulse, 0, Math.PI * 2);
-      ctx.arc(item.x + 10 + drift * 0.6, item.y + 8, 5 * pulse, 0, Math.PI * 2);
-      ctx.arc(item.x + 14 + drift, item.y + 10, 3.8 * pulse, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#dcfce7';
-      ctx.beginPath();
-      ctx.arc(item.x + 10 + drift * 0.5, item.y + 8, 1.4, 0, Math.PI * 2);
-      ctx.fill();
-      return;
-    }
-
-    if (item.kind === 'harm-drop' || item.kind === 'nuclear-drop' || item.kind === 'lava-drop') {
-      ctx.fillStyle = item.color || (item.kind === 'nuclear-drop' ? '#22c55e' : item.kind === 'lava-drop' ? '#f97316' : '#60a5fa');
-      ctx.beginPath();
-      ctx.moveTo(item.x + item.width / 2, item.y);
-      ctx.lineTo(item.x, item.y + item.height);
-      ctx.lineTo(item.x + item.width, item.y + item.height);
-      ctx.closePath();
-      ctx.fill();
-      return;
-    }
-
-    if (item.kind === 'mushroom') {
-      ctx.fillStyle = '#ef4444';
-      ctx.beginPath();
-      ctx.ellipse(item.x + item.width / 2, item.y + item.height * 0.45, item.width * 0.5, item.height * 0.32, 0, Math.PI, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(item.x + item.width * 0.42, item.y + item.height * 0.45, item.width * 0.16, item.height * 0.4);
-      return;
-    }
-
-    if (item.kind === 'hammer') {
-      ctx.fillStyle = '#fef3c7';
-      ctx.fillRect(item.x + 8, item.y + 5, 3, 10);
-      ctx.fillStyle = '#9a3412';
-      ctx.fillRect(item.x + 2, item.y + 3, 14, 4);
-      ctx.fillStyle = '#f59e0b';
-      ctx.fillRect(item.x + 12, item.y + 6, 2, 5);
-      return;
-    }
-
-    if (item.kind === 'heart') {
-      drawHeartShape(item.x + item.width / 2, item.y + item.height / 2 + 1, 12, '#f43f5e');
-    }
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawFallingItems(ctx, fallingItems, {
+    drawHeartShape
   });
 }
 
 function drawPhaseCountdownOverlay() {
-  if (phaseCountdownEndsAt <= 0 || gameState !== 'running') return;
-
-  const remaining = Math.max(0, Math.ceil((phaseCountdownEndsAt - performance.now()) / 1000));
-  if (remaining <= 0) return;
-
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#ffffff';
-  ctx.textAlign = 'center';
-  ctx.font = 'bold 42px Arial';
-  ctx.fillText(`${remaining}`, canvas.width / 2, canvas.height / 2);
-  ctx.font = 'bold 20px Arial';
-  ctx.fillText(getPhaseTitle(), canvas.width / 2, canvas.height / 2 + 40);
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawPhaseCountdownOverlay(ctx, canvas, phaseCountdownEndsAt, gameState, getPhaseTitle);
 }
 
 function endGame(message) {
@@ -3083,98 +2821,23 @@ function endGame(message) {
 }
 
 function promptForPlayerName() {
-  return new Promise((resolve) => {
-    const modal = document.getElementById('name-modal');
-    const customNameRow = document.getElementById('custom-name-row');
-    const customNameInput = document.getElementById('custom-name-input');
-    const confirmCustomButton = document.getElementById('confirm-custom-name');
-    const optionButtons = Array.from(document.querySelectorAll('.name-option'));
-
-    const closeModal = () => {
-      modal.classList.add('hidden');
-      customNameRow.classList.add('hidden');
-      customNameInput.value = '';
-    };
-
-    const finish = (name) => {
-      closeModal();
-      resolve(name || 'Anonymous');
-    };
-
-    optionButtons.forEach((button) => {
-      button.onclick = () => {
-        if (button.dataset.name === 'Other') {
-          customNameRow.classList.remove('hidden');
-          customNameInput.focus();
-          return;
-        }
-
-        finish(button.dataset.name);
-      };
-    });
-
-    confirmCustomButton.onclick = () => {
-      finish(customNameInput.value.trim());
-    };
-
-    modal.onclick = (event) => {
-      if (event.target === modal) {
-        finish('Anonymous');
-      }
-    };
-
-    modal.classList.remove('hidden');
-  });
+  if (!leaderboardModule) return Promise.resolve('Anonymous');
+  return leaderboardModule.promptForPlayerName(document);
 }
 
 async function saveHighScore() {
-  if (score <= 0) return;
-
-  try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    const qualifies = stored.length < MAX_LEADERBOARD_ENTRIES || score > (stored[stored.length - 1]?.score || 0);
-    if (!qualifies) {
-      return;
-    }
-
-    const selectedName = await promptForPlayerName();
-    const entry = {
-      name: selectedName || 'Anonymous',
-      score,
-      date: new Date().toLocaleDateString('en-CA')
-    };
-
-    const updated = [...stored, entry].sort((a, b) => b.score - a.score).slice(0, MAX_LEADERBOARD_ENTRIES);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-    renderLeaderboard(updated);
-  } catch (error) {
-    console.error('Unable to save leaderboard:', error);
-  }
+  if (!leaderboardModule) return;
+  await leaderboardModule.saveHighScore(score, STORAGE_KEY, MAX_LEADERBOARD_ENTRIES, leaderboardList);
 }
 
 function renderLeaderboard(entries) {
-  leaderboardList.innerHTML = '';
-
-  if (!entries.length) {
-    leaderboardList.innerHTML = '<li>No scores yet.</li>';
-    return;
-  }
-
-  entries.forEach((entry) => {
-    const item = document.createElement('li');
-    item.innerHTML = `<strong>${entry.name}</strong> — ${entry.score} pts <span>(${entry.date})</span>`;
-    leaderboardList.appendChild(item);
-  });
+  if (!leaderboardModule) return;
+  leaderboardModule.renderLeaderboard(entries, leaderboardList);
 }
 
 function loadLeaderboard() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    renderLeaderboard(stored);
-  } catch (error) {
-    console.error('Unable to load leaderboard:', error);
-    renderLeaderboard([]);
-  }
+  if (!leaderboardModule) return;
+  leaderboardModule.loadLeaderboard(STORAGE_KEY, leaderboardList);
 }
 
 function loop(timestamp) {
@@ -3211,160 +2874,42 @@ function togglePause() {
   statusDisplay.textContent = 'Keep going!';
 }
 
-window.addEventListener('keydown', (event) => {
-  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-    if (gameState === 'running') {
-      event.preventDefault();
-      const active = document.activeElement;
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT' || active.isContentEditable)) {
-        active.blur();
-      }
+if (controlsModule) {
+  controlsModule.bindControls({
+    windowRef: window,
+    canvas,
+    startButton,
+    pauseButton,
+    restartButton,
+    actionButton,
+    getState: () => ({
+      gameState,
+      paused,
+      awaitingServe,
+      phaseCountdownEndsAt,
+      currentPhase,
+      deceptiveStage: deceptivePhase.stage,
+      minigunCharges,
+      hammerCount
+    }),
+    setHorizontalKey: (key, value) => {
+      keys[key] = value;
+    },
+    onTogglePause: togglePause,
+    onStartGame: startGame,
+    onLaunchBallRandom: () => launchBallRandom(),
+    onDeployMinigun: deployMinigun,
+    onDeployTurret: deployTurret,
+    onFireDeceptiveShot: fireDeceptiveShot,
+    onResetGame: resetGame,
+    onTriggerActionPower: triggerActionPower,
+    onMovePaddleByClientX: movePaddleByClientX,
+    setStatus: (text) => {
+      statusDisplay.textContent = text;
     }
-    keys[event.key] = true;
-  }
-
-  if (event.key === 'Escape' && gameState === 'running') {
-    event.preventDefault();
-    togglePause();
-  }
-
-  if (event.code === 'Enter') {
-    event.preventDefault();
-    if (gameState === 'ready' || gameState === 'over') {
-      startGame();
-    } else if (gameState === 'running' && awaitingServe && !paused && phaseCountdownEndsAt <= 0) {
-      launchBallRandom();
-      statusDisplay.textContent = 'Use ← → to move';
-    }
-  }
-
-  if (event.code === 'Space') {
-    event.preventDefault();
-    if (gameState === 'running' && !paused) {
-      if (minigunCharges > 0) {
-        deployMinigun(performance.now());
-      } else if (hammerCount > 0) {
-        deployTurret(performance.now());
-      }
-    } else if (gameState === 'ready' || gameState === 'over') {
-      startGame();
-    }
-  }
-
-  if (event.code === 'ArrowUp') {
-    if (gameState === 'running') {
-      event.preventDefault();
-      fireDeceptiveShot();
-    }
-  }
-});
-
-window.addEventListener('keyup', (event) => {
-  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-    if (gameState === 'running') {
-      event.preventDefault();
-    }
-    keys[event.key] = false;
-  }
-});
-
-startButton.addEventListener('click', () => {
-  startGame();
-});
-
-pauseButton.addEventListener('click', togglePause);
-restartButton.addEventListener('click', () => {
-  resetGame();
-});
-
-if (actionButton) {
-  actionButton.addEventListener('click', () => {
-    triggerActionPower(performance.now());
   });
-}
 
-canvas.addEventListener('pointerdown', (event) => {
-  event.preventDefault();
-  activePointerId = event.pointerId;
-  activePointerStartX = event.clientX;
-  activePointerStartY = event.clientY;
-  activePointerStartAt = performance.now();
-  canvas.setPointerCapture(event.pointerId);
-  movePaddleByClientX(event.clientX);
-
-  if (gameState === 'running' && awaitingServe && !paused && phaseCountdownEndsAt <= 0) {
-    launchBallRandom();
-    statusDisplay.textContent = 'Use arrows or drag to move';
-  }
-});
-
-canvas.addEventListener('pointermove', (event) => {
-  if (activePointerId !== event.pointerId) return;
-  event.preventDefault();
-  movePaddleByClientX(event.clientX);
-});
-
-canvas.addEventListener('pointerup', (event) => {
-  if (activePointerId !== event.pointerId) return;
-  const swipeDistanceX = event.clientX - activePointerStartX;
-  const swipeDistanceY = event.clientY - activePointerStartY;
-  const swipeDuration = performance.now() - activePointerStartAt;
-  if (
-    event.pointerType === 'touch' &&
-    gameState === 'running' &&
-    !paused &&
-    phaseCountdownEndsAt <= 0 &&
-    currentPhase === 5 &&
-    deceptivePhase.stage === 'guess' &&
-    swipeDistanceY < -40 &&
-    Math.abs(swipeDistanceY) > Math.abs(swipeDistanceX) &&
-    swipeDuration < 900
-  ) {
-    fireDeceptiveShot();
-  }
-  activePointerId = null;
-  if (canvas.hasPointerCapture(event.pointerId)) {
-    canvas.releasePointerCapture(event.pointerId);
-  }
-});
-
-canvas.addEventListener('pointercancel', (event) => {
-  if (activePointerId !== event.pointerId) return;
-  activePointerId = null;
-});
-
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    const isLocalHost =
-      window.location.hostname === 'localhost' ||
-      window.location.hostname === '127.0.0.1' ||
-      window.location.hostname === '::1';
-
-    if (isLocalHost) {
-      // Avoid stale files while testing locally.
-      navigator.serviceWorker
-        .getRegistrations()
-        .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
-        .catch((error) => {
-          console.error('Service worker cleanup failed:', error);
-        });
-
-      if ('caches' in window) {
-        caches
-          .keys()
-          .then((cacheNames) => Promise.all(cacheNames.map((cacheName) => caches.delete(cacheName))))
-          .catch((error) => {
-            console.error('Cache cleanup failed:', error);
-          });
-      }
-
-      return;
-    }
-
-    navigator.serviceWorker.register('./sw.js').catch((error) => {
-      console.error('Service worker registration failed:', error);
-    });
-  });
+  controlsModule.setupServiceWorker(window, navigator);
 }
 
 resetGame();
