@@ -35,8 +35,12 @@ jobs:
           cp breakout.html site/
           cp breakout.css site/
           cp breakout.js site/
+          cp breakout-*.js site/
           cp manifest.webmanifest site/
           cp sw.js site/
+          cp cowboy-hat.png site/
+          cp bdod.jfif site/
+          cp bdod-hit.mpeg site/
           cp -r icons site/icons
 
       - name: Upload artifact
