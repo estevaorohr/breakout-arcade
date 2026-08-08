@@ -4331,7 +4331,7 @@ function drawFallingItems() {
 }
 
 function drawBdodHud() {
-  if (!drawEffectsModule) return;
+  if (!drawEffectsModule || typeof drawEffectsModule.drawBdodHud !== 'function') return;
   drawEffectsModule.drawBdodHud(ctx, bdodCharges, bdodActiveUntil, bdodSprite);
 }
 
