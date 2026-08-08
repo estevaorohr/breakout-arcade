@@ -13,6 +13,10 @@ const leaderboardList = document.getElementById('leaderboard-list');
 
 const cowboyHatSprite = new Image();
 cowboyHatSprite.src = 'cowboy-hat.png';
+const bdodSprite = new Image();
+bdodSprite.src = 'bdod.jfif';
+const bdodHitAudio = new Audio('bdod-hit.mpeg');
+bdodHitAudio.preload = 'auto';
 
 const STORAGE_KEY = 'breakout-top-scores';
 const MAX_LEADERBOARD_ENTRIES = 20;
@@ -29,6 +33,7 @@ const basePaddleSpeed = 7;
 const phaseGrowthEarly = 1.07;
 const phaseGrowthLate = 1.04;
 const hazardBulletSpeedMultiplier = 1.3;
+const radioactiveWaterSpeedCycle = [1.2, 1.1, 0.9, 0.8];
 
 let score = 0;
 let lives = 3;
@@ -97,7 +102,67 @@ let paddleSnaredUntil = 0;
 let paddleInvulnerableUntil = 0;
 let paddleShieldUntil = 0;
 let paddleOverdriveUntil = 0;
+let bdodCharges = 0;
+let bdodActiveUntil = 0;
+let bdodCooldownUntil = 0;
+let bdodBlocksHitProgress = 0;
+let pendingRespawnSlow = false;
 let pausedAt = 0;
+let paddleBubbles = [];
+let waterMeteorHits = 0;
+let waterTint = 'normal';
+let waterEvaporation = {
+  startedAt: 0,
+  activeUntil: 0,
+  surfaceY: 0
+};
+let floweryState = {
+  active: false,
+  phaseLostAt: null,
+  flower: null,
+  stamina: 100,
+  recoverDelayUntil: 0,
+  drainAccumulatorMs: 0,
+  recoverAccumulatorMs: 0
+};
+let arcadeMinigame = {
+  mode: 'idle',
+  gameType: null,
+  countdownEndsAt: 0,
+  targetFoods: 10,
+  foodsEaten: 0,
+  snake: [],
+  direction: { x: 1, y: 0 },
+  nextDirection: { x: 1, y: 0 },
+  food: null,
+  cellSize: 20,
+  cols: 0,
+  rows: 0,
+  nextBombAt: 0,
+  bombs: [],
+  blastLines: [],
+  catchTotalBalls: 20,
+  catchSpawnedBalls: 0,
+  catchCaughtBalls: 0,
+  catchMissedBalls: 0,
+  catchBasketX: 0,
+  catchBasketWidth: 120,
+  catchBasketSpeed: 0,
+  catchFallingBalls: [],
+  catchNextSpawnAt: 0,
+  catchMoveLeft: false,
+  catchMoveRight: false,
+  reflexTotalPrompts: 15,
+  reflexCorrectHits: 0,
+  reflexCurrentPromptIndex: 0,
+  reflexCurrentKey: null,
+  reflexPromptEndsAt: 0,
+  reflexPromptResolved: false,
+  reflexFeedback: '',
+  reflexFeedbackUntil: 0,
+  stepAccumulatorMs: 0,
+  stepEveryMs: 120
+};
 let paddleFace = {
   deadEyes: false,
   nextBlinkAt: 0,
@@ -105,9 +170,9 @@ let paddleFace = {
 };
 let paddle;
 let bricks = [];
-const keys = { ArrowLeft: false, ArrowRight: false };
+const keys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false };
 
-const SPECIAL_TYPES = ['extra-ball', 'double-hit', 'mushroom', 'hammer', 'extra-life', 'roulette', 'wave', 'evil', 'meteor', 'shield'];
+const SPECIAL_TYPES = ['extra-ball', 'double-hit', 'mushroom', 'hammer', 'extra-life', 'roulette', 'wave', 'evil', 'meteor', 'shield', 'bdod', 'arcade', 'flowery'];
 
 const specialsModule = typeof BreakoutSpecials !== 'undefined' ? BreakoutSpecials : null;
 const cowboyRenderModule = typeof BreakoutCowboyRender !== 'undefined' ? BreakoutCowboyRender : null;
@@ -119,6 +184,24 @@ const controlsModule = typeof BreakoutControls !== 'undefined' ? BreakoutControl
 
 function createBall(x, y, vx = 0, vy = 0, radius = 8, speedFactor = 1) {
   return { x, y, vx, vy, radius, speedFactor };
+}
+
+function addRoundedRectPath(ctx, x, y, width, height, radius) {
+  const r = Math.max(0, Math.min(radius, Math.min(width, height) / 2));
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, width, height, r);
+    return;
+  }
+
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
 }
 
 function applySpecialType(brick, type) {
@@ -186,6 +269,21 @@ function applySpecialType(brick, type) {
 
   if (type === 'shield') {
     brick.color = '#1d4ed8';
+    return;
+  }
+
+  if (type === 'bdod') {
+    brick.color = '#111827';
+    return;
+  }
+
+  if (type === 'arcade') {
+    brick.color = '#0f172a';
+    return;
+  }
+
+  if (type === 'flowery') {
+    brick.color = '#84cc16';
   }
 }
 
@@ -203,7 +301,8 @@ function movePaddleByClientX(clientX) {
   const scaleX = canvas.width / rect.width;
   const pointerCanvasX = (clientX - rect.left) * scaleX;
   const targetX = Math.max(0, Math.min(canvas.width - paddle.width, pointerCanvasX - paddle.width / 2));
-  if (paddleSnaredUntil > performance.now()) {
+  const now = performance.now();
+  if (paddleSnaredUntil > now && now >= paddleShieldUntil && !isWaterEffectActive(now)) {
     paddle.x += (targetX - paddle.x) * 0.15;
     return;
   }
@@ -212,6 +311,7 @@ function movePaddleByClientX(clientX) {
 
 function triggerActionPower(now = performance.now()) {
   if (gameState !== 'running' || paused) return false;
+  if (arcadeMinigame.mode !== 'idle') return false;
 
   if (currentPhase === 5) {
     statusDisplay.textContent = 'Turrets are disabled in Phase 5';
@@ -303,8 +403,21 @@ function shiftTimeBasedState(deltaMs) {
     paddleOverdriveUntil += deltaMs;
   }
 
+  if (bdodActiveUntil > 0) {
+    bdodActiveUntil += deltaMs;
+  }
+
+  if (bdodCooldownUntil > 0) {
+    bdodCooldownUntil += deltaMs;
+  }
+
   if (spotlightEffect.activeUntil > 0) {
     spotlightEffect.activeUntil += deltaMs;
+  }
+
+  if (waterEvaporation.activeUntil > 0) {
+    waterEvaporation.startedAt += deltaMs;
+    waterEvaporation.activeUntil += deltaMs;
   }
 
   evilHands.forEach((hand) => {
@@ -326,16 +439,813 @@ function shiftTimeBasedState(deltaMs) {
     if (ball.nuclearBoostEndsAt) {
       ball.nuclearBoostEndsAt += deltaMs;
     }
+    if (ball.radioactiveWaterNextShiftAt) {
+      ball.radioactiveWaterNextShiftAt += deltaMs;
+    }
+    if (ball.angelWingsUntil) {
+      ball.angelWingsUntil += deltaMs;
+    }
   });
 
   waterImpacts.forEach((impact) => {
     impact.startedAt += deltaMs;
     impact.endsAt += deltaMs;
   });
+
+  paddleBubbles.forEach((bubble) => {
+    bubble.startedAt += deltaMs;
+    bubble.endsAt += deltaMs;
+  });
 }
 
 function getPhaseTitle() {
   return currentPhase === 5 ? 'Fase Enganadora' : `Phase ${currentPhase}`;
+}
+
+function getPaddleSpeedMultiplierForPhase(phase = currentPhase) {
+  if (phase <= 10) {
+    return BreakoutUtils.getPaddleSpeedMultiplierFor(phase, 1.02);
+  }
+
+  const phase10Multiplier = BreakoutUtils.getPaddleSpeedMultiplierFor(10, 1.02);
+  return phase10Multiplier * Math.pow(1.04, phase - 10);
+}
+
+function onBdodBlockBroken(now = performance.now()) {
+  bdodBlocksHitProgress += 1;
+  if (bdodBlocksHitProgress >= 2) {
+    bdodBlocksHitProgress = 0;
+    lives += 1;
+    updateHud(now);
+    statusDisplay.textContent = `BDOD milestone reached: +1 life (${lives})`;
+  } else {
+    const missing = 2 - bdodBlocksHitProgress;
+    statusDisplay.textContent = `BDOD progress: ${missing} block${missing === 1 ? '' : 's'} left for +1 life`;
+  }
+}
+
+function spawnFloweryCompanion(brick, now = performance.now()) {
+  floweryState.active = true;
+  floweryState.stamina = 100;
+  floweryState.recoverDelayUntil = now;
+  floweryState.drainAccumulatorMs = 0;
+  floweryState.recoverAccumulatorMs = 0;
+  floweryState.phaseLostAt = null;
+  floweryState.flower = {
+    x: brick.x + brick.width / 2,
+    y: brick.y + brick.height / 2,
+    mode: 'waiting',
+    waitUntil: now + 500,
+    petalSpin: 0
+  };
+}
+
+function removeFloweryCompanion() {
+  floweryState.active = false;
+  floweryState.flower = null;
+  floweryState.stamina = 100;
+  floweryState.recoverDelayUntil = 0;
+  floweryState.drainAccumulatorMs = 0;
+  floweryState.recoverAccumulatorMs = 0;
+}
+
+function updateFlowerySystem(now, delta) {
+  if (!floweryState.active || !floweryState.flower) return;
+
+  const flower = floweryState.flower;
+  const targetX = paddle.x + paddle.width + 18;
+  const targetY = paddle.y + paddle.height / 2;
+
+  if (flower.mode === 'waiting' && now >= flower.waitUntil) {
+    flower.mode = 'moving';
+  }
+
+  if (flower.mode === 'moving') {
+    const dx = targetX - flower.x;
+    const dy = targetY - flower.y;
+    const distance = Math.hypot(dx, dy);
+    const step = Math.max(1.5, 7.2 * delta);
+    if (distance <= step) {
+      flower.x = targetX;
+      flower.y = targetY;
+      flower.mode = 'attached';
+    } else {
+      flower.x += (dx / distance) * step;
+      flower.y += (dy / distance) * step;
+    }
+  }
+
+  if (flower.mode === 'attached') {
+    flower.x = targetX;
+    flower.y = targetY;
+
+    const canSprint = keys.ArrowUp && floweryState.stamina > 0 && arcadeMinigame.mode === 'idle';
+    if (canSprint) {
+      floweryState.drainAccumulatorMs += delta * 16.67;
+      floweryState.recoverDelayUntil = now + 600;
+      floweryState.recoverAccumulatorMs = 0;
+      while (floweryState.drainAccumulatorMs >= 50) {
+        floweryState.drainAccumulatorMs -= 50;
+        floweryState.stamina = Math.max(0, floweryState.stamina - 1);
+      }
+      flower.petalSpin += delta * 0.22;
+    } else {
+      floweryState.drainAccumulatorMs = 0;
+      if (now >= floweryState.recoverDelayUntil) {
+        floweryState.recoverAccumulatorMs += delta * 16.67;
+        while (floweryState.recoverAccumulatorMs >= 100) {
+          floweryState.recoverAccumulatorMs -= 100;
+          floweryState.stamina = Math.min(100, floweryState.stamina + 1);
+        }
+      }
+    }
+  }
+}
+
+function isFlowerySprintActive() {
+  if (!floweryState.active || !floweryState.flower) return false;
+  if (floweryState.flower.mode !== 'attached') return false;
+  return keys.ArrowUp && floweryState.stamina > 0 && arcadeMinigame.mode === 'idle';
+}
+
+function resetArcadeMinigameState() {
+  arcadeMinigame = {
+    mode: 'idle',
+    gameType: null,
+    countdownEndsAt: 0,
+    targetFoods: 10,
+    foodsEaten: 0,
+    snake: [],
+    direction: { x: 1, y: 0 },
+    nextDirection: { x: 1, y: 0 },
+    food: null,
+    cellSize: 20,
+    cols: 0,
+    rows: 0,
+    nextBombAt: 0,
+    bombs: [],
+    blastLines: [],
+    catchTotalBalls: 20,
+    catchSpawnedBalls: 0,
+    catchCaughtBalls: 0,
+    catchMissedBalls: 0,
+    catchBasketX: 0,
+    catchBasketWidth: 120,
+    catchBasketSpeed: 0,
+    catchFallingBalls: [],
+    catchNextSpawnAt: 0,
+    catchMoveLeft: false,
+    catchMoveRight: false,
+    reflexTotalPrompts: 15,
+    reflexCorrectHits: 0,
+    reflexCurrentPromptIndex: 0,
+    reflexCurrentKey: null,
+    reflexPromptEndsAt: 0,
+    reflexPromptResolved: false,
+    reflexFeedback: '',
+    reflexFeedbackUntil: 0,
+    stepAccumulatorMs: 0,
+    stepEveryMs: 120
+  };
+}
+
+function spawnArcadeFood() {
+  if (arcadeMinigame.cols <= 0 || arcadeMinigame.rows <= 0) return;
+
+  const occupied = new Set(arcadeMinigame.snake.map((segment) => `${segment.x},${segment.y}`));
+  let attempts = 0;
+  while (attempts < 500) {
+    const x = Math.floor(Math.random() * arcadeMinigame.cols);
+    const y = Math.floor(Math.random() * arcadeMinigame.rows);
+    if (!occupied.has(`${x},${y}`)) {
+      arcadeMinigame.food = { x, y };
+      return;
+    }
+    attempts += 1;
+  }
+
+  arcadeMinigame.food = { x: 0, y: 0 };
+}
+
+function spawnArcadeBomb(now = performance.now()) {
+  if (arcadeMinigame.cols <= 0 || arcadeMinigame.rows <= 0) return;
+
+  const occupied = new Set(arcadeMinigame.snake.map((segment) => `${segment.x},${segment.y}`));
+  if (arcadeMinigame.food) {
+    occupied.add(`${arcadeMinigame.food.x},${arcadeMinigame.food.y}`);
+  }
+  arcadeMinigame.bombs.forEach((bomb) => {
+    if (!bomb.exploded && bomb.explodeAt > now) {
+      occupied.add(`${bomb.x},${bomb.y}`);
+    }
+  });
+
+  let attempts = 0;
+  while (attempts < 500) {
+    const x = Math.floor(Math.random() * arcadeMinigame.cols);
+    const y = Math.floor(Math.random() * arcadeMinigame.rows);
+    if (!occupied.has(`${x},${y}`)) {
+      arcadeMinigame.bombs.push({
+        x,
+        y,
+        spawnedAt: now,
+        explodeAt: now + 3000,
+        exploded: false
+      });
+      return;
+    }
+    attempts += 1;
+  }
+}
+
+function startArcadeMinigame(now = performance.now()) {
+  if (gameState !== 'running') return false;
+  if (arcadeMinigame.mode !== 'idle') return false;
+
+  keys.ArrowLeft = false;
+  keys.ArrowRight = false;
+  const gameTypes = ['snake', 'catch', 'reflex'];
+  arcadeMinigame.gameType = gameTypes[Math.floor(Math.random() * gameTypes.length)];
+  arcadeMinigame.mode = 'countdown';
+  arcadeMinigame.countdownEndsAt = now + 3000;
+  statusDisplay.textContent = `Minigame Time: ${arcadeMinigame.gameType}`;
+  return true;
+}
+
+function beginArcadeSnakePlay() {
+  const cellSize = 20;
+  const cols = Math.max(10, Math.floor(canvas.width / cellSize));
+  const rows = Math.max(12, Math.floor(canvas.height / cellSize));
+  const startX = Math.floor(cols / 2);
+  const startY = Math.floor(rows / 2);
+
+  arcadeMinigame.mode = 'active';
+  arcadeMinigame.cellSize = cellSize;
+  arcadeMinigame.cols = cols;
+  arcadeMinigame.rows = rows;
+  arcadeMinigame.foodsEaten = 0;
+  arcadeMinigame.direction = { x: 1, y: 0 };
+  arcadeMinigame.nextDirection = { x: 1, y: 0 };
+  arcadeMinigame.nextBombAt = performance.now() + 5000;
+  arcadeMinigame.bombs = [];
+  arcadeMinigame.blastLines = [];
+  arcadeMinigame.stepAccumulatorMs = 0;
+  arcadeMinigame.snake = [
+    { x: startX, y: startY },
+    { x: startX - 1, y: startY },
+    { x: startX - 2, y: startY },
+    { x: startX - 3, y: startY }
+  ];
+
+  spawnArcadeFood();
+  statusDisplay.textContent = 'Minigame: eat 10 dots';
+}
+
+function beginArcadeCatchPlay(now = performance.now()) {
+  arcadeMinigame.mode = 'active';
+  arcadeMinigame.catchSpawnedBalls = 0;
+  arcadeMinigame.catchCaughtBalls = 0;
+  arcadeMinigame.catchMissedBalls = 0;
+  arcadeMinigame.catchBasketWidth = Math.max(96, paddle ? paddle.baseWidth : 110);
+  arcadeMinigame.catchBasketX = canvas.width / 2 - arcadeMinigame.catchBasketWidth / 2;
+  arcadeMinigame.catchBasketSpeed = Math.max(5.6, basePaddleSpeed * getPaddleSpeedMultiplierForPhase(currentPhase));
+  arcadeMinigame.catchFallingBalls = [];
+  arcadeMinigame.catchNextSpawnAt = now;
+  arcadeMinigame.catchMoveLeft = false;
+  arcadeMinigame.catchMoveRight = false;
+  statusDisplay.textContent = 'Catch game: catch 10 of 20 balls';
+}
+
+function pickReflexKey() {
+  const keysPool = ['A', 'S', 'D', 'F', 'J', 'K', 'L', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', 'Z', 'X', 'C', 'V', 'B', 'N', 'M'];
+  return keysPool[Math.floor(Math.random() * keysPool.length)];
+}
+
+function beginNextReflexPrompt(now = performance.now()) {
+  arcadeMinigame.reflexCurrentKey = pickReflexKey();
+  arcadeMinigame.reflexPromptEndsAt = now + 3000;
+  arcadeMinigame.reflexPromptResolved = false;
+}
+
+function beginArcadeReflexPlay(now = performance.now()) {
+  arcadeMinigame.mode = 'active';
+  arcadeMinigame.reflexCorrectHits = 0;
+  arcadeMinigame.reflexCurrentPromptIndex = 0;
+  arcadeMinigame.reflexFeedback = '';
+  arcadeMinigame.reflexFeedbackUntil = 0;
+  beginNextReflexPrompt(now);
+  statusDisplay.textContent = 'Reflex game: hit 7 of 15 keys';
+}
+
+function beginArcadePlay(now = performance.now()) {
+  if (arcadeMinigame.gameType === 'catch') {
+    beginArcadeCatchPlay(now);
+    return;
+  }
+
+  if (arcadeMinigame.gameType === 'reflex') {
+    beginArcadeReflexPlay(now);
+    return;
+  }
+
+  beginArcadeSnakePlay();
+}
+
+function setArcadeDirection(keyCode, isPressed = true) {
+  if (arcadeMinigame.mode !== 'active') return;
+
+  if (arcadeMinigame.gameType === 'catch') {
+    if (keyCode === 'ArrowLeft') {
+      arcadeMinigame.catchMoveLeft = isPressed;
+    }
+    if (keyCode === 'ArrowRight') {
+      arcadeMinigame.catchMoveRight = isPressed;
+    }
+    return;
+  }
+
+  if (arcadeMinigame.gameType !== 'snake') return;
+
+  let nextX = arcadeMinigame.nextDirection.x;
+  let nextY = arcadeMinigame.nextDirection.y;
+  if (keyCode === 'ArrowLeft') {
+    nextX = -1;
+    nextY = 0;
+  } else if (keyCode === 'ArrowRight') {
+    nextX = 1;
+    nextY = 0;
+  } else if (keyCode === 'ArrowUp') {
+    nextX = 0;
+    nextY = -1;
+  } else if (keyCode === 'ArrowDown') {
+    nextX = 0;
+    nextY = 1;
+  } else {
+    return;
+  }
+
+  if (nextX === -arcadeMinigame.direction.x && nextY === -arcadeMinigame.direction.y) {
+    return;
+  }
+
+  arcadeMinigame.nextDirection = { x: nextX, y: nextY };
+}
+
+function handleArcadeKeyPress(key, now = performance.now()) {
+  if (arcadeMinigame.mode !== 'active') return;
+  if (arcadeMinigame.gameType !== 'reflex') return;
+  if (arcadeMinigame.reflexPromptResolved) return;
+
+  const normalized = key.length === 1 ? key.toUpperCase() : key.toUpperCase();
+  if (normalized !== arcadeMinigame.reflexCurrentKey) {
+    arcadeMinigame.reflexPromptResolved = true;
+    arcadeMinigame.reflexFeedback = 'ERROU';
+    arcadeMinigame.reflexFeedbackUntil = now + 350;
+    arcadeMinigame.reflexCurrentPromptIndex += 1;
+
+    if (arcadeMinigame.reflexCurrentPromptIndex >= arcadeMinigame.reflexTotalPrompts) {
+      finishArcadeMinigame(arcadeMinigame.reflexCorrectHits >= 7, now);
+      return;
+    }
+
+    beginNextReflexPrompt(now);
+    return;
+  }
+
+  arcadeMinigame.reflexCorrectHits += 1;
+  arcadeMinigame.reflexPromptResolved = true;
+  arcadeMinigame.reflexFeedback = 'ACERTOU';
+  arcadeMinigame.reflexFeedbackUntil = now + 350;
+  arcadeMinigame.reflexCurrentPromptIndex += 1;
+
+  if (arcadeMinigame.reflexCurrentPromptIndex >= arcadeMinigame.reflexTotalPrompts) {
+    finishArcadeMinigame(arcadeMinigame.reflexCorrectHits >= 7, now);
+    return;
+  }
+
+  beginNextReflexPrompt(now);
+}
+
+function finishArcadeMinigame(won, now = performance.now()) {
+  resetArcadeMinigameState();
+
+  if (won) {
+    lives += 1;
+    updateHud(now);
+    statusDisplay.textContent = `Minigame won! +1 life (${lives})`;
+    return;
+  }
+
+  lives = Math.max(0, lives - 1);
+  updateHud(now);
+  if (lives <= 0) {
+    endGame('Game over');
+    return;
+  }
+
+  statusDisplay.textContent = `Minigame failed! -1 life (${lives})`;
+}
+
+function checkArcadeBlastDamage(now = performance.now()) {
+  if (arcadeMinigame.mode !== 'active' || arcadeMinigame.gameType !== 'snake' || !arcadeMinigame.snake.length) return false;
+
+  const head = arcadeMinigame.snake[0];
+  const hitByBlast = arcadeMinigame.blastLines.some((blast) => {
+    if (blast.until <= now) return false;
+    return head.x === blast.col || head.y === blast.row;
+  });
+
+  if (hitByBlast) {
+    finishArcadeMinigame(false, now);
+    return true;
+  }
+
+  return false;
+}
+
+function updateArcadeBombs(now = performance.now()) {
+  if (arcadeMinigame.mode !== 'active' || arcadeMinigame.gameType !== 'snake') return;
+
+  if (arcadeMinigame.nextBombAt > 0 && now >= arcadeMinigame.nextBombAt) {
+    spawnArcadeBomb(now);
+    arcadeMinigame.nextBombAt = now + 5000;
+  }
+
+  arcadeMinigame.bombs = arcadeMinigame.bombs.filter((bomb) => {
+    if (!bomb.exploded && now >= bomb.explodeAt) {
+      bomb.exploded = true;
+      arcadeMinigame.blastLines.push({
+        col: bomb.x,
+        row: bomb.y,
+        startedAt: now,
+        until: now + 2000
+      });
+      checkArcadeBlastDamage(now);
+      return false;
+    }
+
+    return !bomb.exploded;
+  });
+
+  arcadeMinigame.blastLines = arcadeMinigame.blastLines.filter((blast) => blast.until > now);
+}
+
+function stepArcadeSnakeMinigame(now = performance.now()) {
+  if (arcadeMinigame.mode !== 'active' || arcadeMinigame.gameType !== 'snake') return;
+
+  arcadeMinigame.direction = { ...arcadeMinigame.nextDirection };
+  const head = arcadeMinigame.snake[0];
+  const nextHead = {
+    x: head.x + arcadeMinigame.direction.x,
+    y: head.y + arcadeMinigame.direction.y
+  };
+
+  if (
+    nextHead.x < 0 ||
+    nextHead.y < 0 ||
+    nextHead.x >= arcadeMinigame.cols ||
+    nextHead.y >= arcadeMinigame.rows
+  ) {
+    finishArcadeMinigame(false, now);
+    return;
+  }
+
+  const hitBody = arcadeMinigame.snake.some((segment) => segment.x === nextHead.x && segment.y === nextHead.y);
+  if (hitBody) {
+    finishArcadeMinigame(false, now);
+    return;
+  }
+
+  arcadeMinigame.snake.unshift(nextHead);
+  const ateFood = arcadeMinigame.food && nextHead.x === arcadeMinigame.food.x && nextHead.y === arcadeMinigame.food.y;
+
+  if (ateFood) {
+    arcadeMinigame.foodsEaten += 1;
+    if (arcadeMinigame.foodsEaten >= arcadeMinigame.targetFoods) {
+      finishArcadeMinigame(true, now);
+      return;
+    }
+    spawnArcadeFood();
+  } else {
+    arcadeMinigame.snake.pop();
+  }
+
+  checkArcadeBlastDamage(now);
+}
+
+function updateArcadeCatchMinigame(now, delta) {
+  const movement = arcadeMinigame.catchBasketSpeed * delta;
+  if (arcadeMinigame.catchMoveLeft && !arcadeMinigame.catchMoveRight) {
+    arcadeMinigame.catchBasketX = Math.max(0, arcadeMinigame.catchBasketX - movement);
+  } else if (arcadeMinigame.catchMoveRight && !arcadeMinigame.catchMoveLeft) {
+    arcadeMinigame.catchBasketX = Math.min(canvas.width - arcadeMinigame.catchBasketWidth, arcadeMinigame.catchBasketX + movement);
+  }
+
+  while (arcadeMinigame.catchSpawnedBalls < arcadeMinigame.catchTotalBalls && now >= arcadeMinigame.catchNextSpawnAt) {
+    arcadeMinigame.catchSpawnedBalls += 1;
+    arcadeMinigame.catchNextSpawnAt += 1000;
+    arcadeMinigame.catchFallingBalls.push({
+      x: 24 + Math.random() * (canvas.width - 48),
+      y: -10,
+      radius: 8,
+      vy: phaseBallSpeed * 0.7
+    });
+  }
+
+  arcadeMinigame.catchFallingBalls = arcadeMinigame.catchFallingBalls.filter((ball) => {
+    ball.y += ball.vy * delta;
+
+    const basketTop = canvas.height - 60;
+    const caught =
+      ball.y + ball.radius >= basketTop &&
+      ball.y - ball.radius <= basketTop + 18 &&
+      ball.x + ball.radius >= arcadeMinigame.catchBasketX &&
+      ball.x - ball.radius <= arcadeMinigame.catchBasketX + arcadeMinigame.catchBasketWidth;
+
+    if (caught) {
+      arcadeMinigame.catchCaughtBalls += 1;
+      if (arcadeMinigame.catchCaughtBalls >= 10) {
+        finishArcadeMinigame(true, now);
+        return false;
+      }
+      return false;
+    }
+
+    if (ball.y - ball.radius > canvas.height) {
+      arcadeMinigame.catchMissedBalls += 1;
+      return false;
+    }
+
+    return true;
+  });
+
+  if (arcadeMinigame.mode !== 'active') return;
+
+  const allProcessed =
+    arcadeMinigame.catchSpawnedBalls >= arcadeMinigame.catchTotalBalls &&
+    arcadeMinigame.catchFallingBalls.length === 0;
+
+  if (allProcessed) {
+    finishArcadeMinigame(arcadeMinigame.catchCaughtBalls >= 10, now);
+  }
+}
+
+function updateArcadeReflexMinigame(now) {
+  if (now <= arcadeMinigame.reflexPromptEndsAt) return;
+
+  if (!arcadeMinigame.reflexPromptResolved) {
+    arcadeMinigame.reflexPromptResolved = true;
+    arcadeMinigame.reflexFeedback = 'ERROU';
+    arcadeMinigame.reflexFeedbackUntil = now + 350;
+    arcadeMinigame.reflexCurrentPromptIndex += 1;
+  }
+
+  if (arcadeMinigame.reflexCurrentPromptIndex >= arcadeMinigame.reflexTotalPrompts) {
+    finishArcadeMinigame(arcadeMinigame.reflexCorrectHits >= 7, now);
+    return;
+  }
+
+  beginNextReflexPrompt(now);
+}
+
+function updateArcadeMinigame(now, delta) {
+  if (arcadeMinigame.mode === 'idle') return false;
+
+  if (arcadeMinigame.mode === 'countdown') {
+    if (now >= arcadeMinigame.countdownEndsAt) {
+      beginArcadePlay(now);
+    }
+    return true;
+  }
+
+  if (arcadeMinigame.mode === 'active') {
+    if (arcadeMinigame.gameType === 'snake') {
+      updateArcadeBombs(now);
+      if (arcadeMinigame.mode !== 'active') return true;
+
+      arcadeMinigame.stepAccumulatorMs += delta * 16.67;
+      while (arcadeMinigame.stepAccumulatorMs >= arcadeMinigame.stepEveryMs) {
+        arcadeMinigame.stepAccumulatorMs -= arcadeMinigame.stepEveryMs;
+        stepArcadeSnakeMinigame(now);
+        if (arcadeMinigame.mode !== 'active') break;
+      }
+      return true;
+    }
+
+    if (arcadeMinigame.gameType === 'catch') {
+      updateArcadeCatchMinigame(now, delta);
+      return true;
+    }
+
+    if (arcadeMinigame.gameType === 'reflex') {
+      updateArcadeReflexMinigame(now);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function drawArcadeMinigameOverlay() {
+  const now = performance.now();
+  if (arcadeMinigame.mode === 'idle') return;
+
+  ctx.fillStyle = 'rgba(2, 6, 23, 0.95)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (arcadeMinigame.mode === 'countdown') {
+    const remaining = Math.max(0, Math.ceil((arcadeMinigame.countdownEndsAt - now) / 1000));
+    const titleByType = {
+      snake: 'SNAKE PADDLE',
+      catch: 'BASKET CATCH',
+      reflex: 'KEY REFLEX'
+    };
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 56px Arial';
+    ctx.fillText('MINIGAME TIME', canvas.width / 2, canvas.height / 2 - 20);
+    ctx.font = 'bold 26px Arial';
+    ctx.fillText(titleByType[arcadeMinigame.gameType] || 'MINIGAME', canvas.width / 2, canvas.height / 2 + 22);
+    ctx.font = 'bold 86px Arial';
+    ctx.fillStyle = '#facc15';
+    ctx.fillText(`${remaining}`, canvas.width / 2, canvas.height / 2 + 90);
+    return;
+  }
+
+  if (arcadeMinigame.mode === 'active' && arcadeMinigame.gameType === 'snake') {
+    const cell = arcadeMinigame.cellSize;
+    const boardWidth = arcadeMinigame.cols * cell;
+    const boardHeight = arcadeMinigame.rows * cell;
+    const boardX = Math.floor((canvas.width - boardWidth) / 2);
+    const boardY = Math.floor((canvas.height - boardHeight) / 2);
+
+    ctx.fillStyle = '#0b1220';
+    ctx.fillRect(boardX, boardY, boardWidth, boardHeight);
+    ctx.strokeStyle = '#334155';
+    ctx.strokeRect(boardX, boardY, boardWidth, boardHeight);
+
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+    ctx.lineWidth = 1;
+    for (let x = 1; x < arcadeMinigame.cols; x += 1) {
+      const gx = boardX + x * cell + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(gx, boardY);
+      ctx.lineTo(gx, boardY + boardHeight);
+      ctx.stroke();
+    }
+    for (let y = 1; y < arcadeMinigame.rows; y += 1) {
+      const gy = boardY + y * cell + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(boardX, gy);
+      ctx.lineTo(boardX + boardWidth, gy);
+      ctx.stroke();
+    }
+
+    arcadeMinigame.snake.forEach((segment, index) => {
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(boardX + segment.x * cell + 1, boardY + segment.y * cell + 1, cell - 2, cell - 2);
+
+      if (index === 0) {
+        const headCx = boardX + segment.x * cell + cell / 2;
+        const headCy = boardY + segment.y * cell + cell / 2;
+        const eyeOffsetX = 3;
+        const eyeOffsetY = -2;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(headCx - eyeOffsetX, headCy + eyeOffsetY, 2, 0, Math.PI * 2);
+        ctx.arc(headCx + eyeOffsetX, headCy + eyeOffsetY, 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#111827';
+        ctx.beginPath();
+        ctx.arc(headCx - eyeOffsetX, headCy + eyeOffsetY, 0.9, 0, Math.PI * 2);
+        ctx.arc(headCx + eyeOffsetX, headCy + eyeOffsetY, 0.9, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    });
+
+    if (arcadeMinigame.food) {
+      ctx.fillStyle = '#f97316';
+      ctx.beginPath();
+      ctx.arc(
+        boardX + arcadeMinigame.food.x * cell + cell / 2,
+        boardY + arcadeMinigame.food.y * cell + cell / 2,
+        Math.max(4, cell * 0.25),
+        0,
+        Math.PI * 2
+      );
+      ctx.fill();
+    }
+
+    arcadeMinigame.bombs.forEach((bomb) => {
+      const elapsed = Math.max(0, now - bomb.spawnedAt);
+      let bombColor = '#facc15';
+      if (elapsed >= 2000) {
+        bombColor = '#ef4444';
+      } else if (elapsed >= 1000) {
+        bombColor = '#fb923c';
+      }
+      const blink = 0.6 + 0.4 * Math.sin(now * 0.02);
+      const cx = boardX + bomb.x * cell + cell / 2;
+      const cy = boardY + bomb.y * cell + cell / 2;
+      const r = Math.max(5, cell * 0.28);
+      ctx.fillStyle = bombColor;
+      ctx.globalAlpha = blink;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    });
+
+    arcadeMinigame.blastLines.forEach((blast) => {
+      const life = Math.max(0, Math.min(1, (blast.until - now) / 2000));
+      ctx.fillStyle = `rgba(239, 68, 68, ${0.28 + life * 0.45})`;
+      ctx.fillRect(boardX, boardY + blast.row * cell, boardWidth, cell);
+      ctx.fillRect(boardX + blast.col * cell, boardY, cell, boardHeight);
+    });
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 24px Arial';
+    ctx.fillText(`Snake Paddle: ${arcadeMinigame.foodsEaten}/${arcadeMinigame.targetFoods}`, canvas.width / 2, boardY - 16);
+    ctx.font = 'bold 16px Arial';
+    ctx.fillStyle = '#fca5a5';
+    ctx.fillText('Bombs every 5s: yellow -> orange -> red -> cross blast', canvas.width / 2, boardY + boardHeight + 22);
+    return;
+  }
+
+  if (arcadeMinigame.mode === 'active' && arcadeMinigame.gameType === 'catch') {
+    const basketY = canvas.height - 60;
+
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.22)';
+    for (let x = 0; x <= canvas.width; x += 32) {
+      ctx.beginPath();
+      ctx.moveTo(x + 0.5, 0);
+      ctx.lineTo(x + 0.5, canvas.height);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= canvas.height; y += 32) {
+      ctx.beginPath();
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(canvas.width, y + 0.5);
+      ctx.stroke();
+    }
+
+    arcadeMinigame.catchFallingBalls.forEach((ball) => {
+      ctx.fillStyle = '#f8fafc';
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    ctx.fillStyle = '#a16207';
+    ctx.fillRect(arcadeMinigame.catchBasketX, basketY, arcadeMinigame.catchBasketWidth, 18);
+    ctx.strokeStyle = '#facc15';
+    ctx.strokeRect(arcadeMinigame.catchBasketX, basketY, arcadeMinigame.catchBasketWidth, 18);
+    ctx.strokeRect(arcadeMinigame.catchBasketX + 6, basketY - 6, arcadeMinigame.catchBasketWidth - 12, 7);
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 28px Arial';
+    ctx.fillText(`Catch ${arcadeMinigame.catchCaughtBalls}/10`, canvas.width / 2, 48);
+    ctx.font = 'bold 18px Arial';
+    ctx.fillText(`Balls: ${arcadeMinigame.catchSpawnedBalls}/${arcadeMinigame.catchTotalBalls}`, canvas.width / 2, 78);
+    return;
+  }
+
+  if (arcadeMinigame.mode === 'active' && arcadeMinigame.gameType === 'reflex') {
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 24px Arial';
+    ctx.fillText(`Prompt ${arcadeMinigame.reflexCurrentPromptIndex + 1}/${arcadeMinigame.reflexTotalPrompts}`, canvas.width / 2, 66);
+
+    const timeRemaining = Math.max(0, (arcadeMinigame.reflexPromptEndsAt - now) / 1000);
+    ctx.font = 'bold 20px Arial';
+    ctx.fillStyle = '#fde68a';
+    ctx.fillText(`Time: ${timeRemaining.toFixed(1)}s`, canvas.width / 2, 98);
+
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.fillRect(canvas.width / 2 - 170, canvas.height / 2 - 95, 340, 190);
+    ctx.strokeStyle = '#334155';
+    ctx.strokeRect(canvas.width / 2 - 170, canvas.height / 2 - 95, 340, 190);
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 22px Arial';
+    ctx.fillText('PRESS THIS KEY', canvas.width / 2, canvas.height / 2 - 28);
+    ctx.font = 'bold 86px Arial';
+    ctx.fillStyle = '#22d3ee';
+    ctx.fillText(arcadeMinigame.reflexCurrentKey || '-', canvas.width / 2, canvas.height / 2 + 58);
+
+    if (arcadeMinigame.reflexFeedback && arcadeMinigame.reflexFeedbackUntil > now) {
+      ctx.font = 'bold 30px Arial';
+      ctx.fillStyle = arcadeMinigame.reflexFeedback === 'ACERTOU' ? '#4ade80' : '#f87171';
+      ctx.fillText(arcadeMinigame.reflexFeedback, canvas.width / 2, canvas.height / 2 + 112);
+    }
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 24px Arial';
+    ctx.fillText(`Hits: ${arcadeMinigame.reflexCorrectHits}/7`, canvas.width / 2, canvas.height - 28);
+  }
 }
 
 function getPaddleInvulnerableUntil() {
@@ -367,6 +1277,41 @@ function getSpotlightGeometry() {
     topHalfWidth: spotlightEffect.topHalfWidth,
     bottomHalfWidth: spotlightEffect.bottomHalfWidth
   };
+}
+
+function isBdodActive(now = performance.now()) {
+  return bdodActiveUntil > now;
+}
+
+function activateBdodMode(now = performance.now()) {
+  if (gameState !== 'running' || paused) return false;
+  if (arcadeMinigame.mode !== 'idle') return false;
+  if (bdodCharges <= 0 || isBdodActive(now)) return false;
+  if (now < bdodCooldownUntil) {
+    const remaining = (Math.ceil((bdodCooldownUntil - now) / 100) / 10).toFixed(1);
+    statusDisplay.textContent = `BDOD cooldown: ${remaining}s`;
+    return false;
+  }
+
+  bdodCharges -= 1;
+  bdodActiveUntil = now + 1500;
+  bdodCooldownUntil = now + 5000;
+  updateHud(now);
+  statusDisplay.textContent = 'BDOD active: shield the paddle for 1.5s with heavy slow';
+  return true;
+}
+
+function interceptBdodDamage(now = performance.now(), source = 'hazard') {
+  if (!isBdodActive(now)) return false;
+
+  lives += 1;
+  updateHud(now);
+  bdodHitAudio.currentTime = 0;
+  bdodHitAudio.play().catch(() => {
+    // Ignore autoplay/format restrictions and keep gameplay flowing.
+  });
+  statusDisplay.textContent = `BDOD blocked ${source}: +1 life (${lives})`;
+  return true;
 }
 
 function isWaterEffectActive(now = performance.now()) {
@@ -429,7 +1374,33 @@ function activateWaterWave(now = performance.now()) {
   waterEffect.rowsFrom = waterEffect.levelRows;
   waterEffect.rowsTo = waterEffect.levelRows;
   waterEffect.rowsTransitionStartedAt = 0;
+  waterMeteorHits = 0;
+  waterTint = 'normal';
+  waterEvaporation = { startedAt: 0, activeUntil: 0, surfaceY: 0 };
   statusDisplay.textContent = 'Wave activated: rising water for 20s';
+}
+
+function triggerWaterEvaporation(now = performance.now()) {
+  waterEvaporation.startedAt = now;
+  waterEvaporation.activeUntil = now + 1600;
+  waterEvaporation.surfaceY = getWaterSurfaceY(now);
+}
+
+function resetWaterEffectState() {
+  waterEffect.activeUntil = 0;
+  waterEffect.startedAt = 0;
+  waterEffect.surgeUntil = 0;
+  waterEffect.rowsCurrent = waterEffect.levelRows;
+  waterEffect.rowsFrom = waterEffect.levelRows;
+  waterEffect.rowsTo = waterEffect.levelRows;
+  waterEffect.rowsTransitionStartedAt = 0;
+}
+
+function cancelWaterWave(now = performance.now(), evaporate = false) {
+  if (evaporate) {
+    triggerWaterEvaporation(now);
+  }
+  resetWaterEffectState();
 }
 
 function absorbRainIntoWave(item, now) {
@@ -443,6 +1414,29 @@ function absorbRainIntoWave(item, now) {
   if (item.y + item.height < surfaceY) return false;
 
   if (impactOnlyKinds.has(item.kind)) {
+    if (item.kind === 'lava-meteor') {
+      waterMeteorHits = Math.min(5, waterMeteorHits + 1);
+      waterTint = 'red';
+      createWaterImpact(item, now);
+
+      if (waterMeteorHits >= 5) {
+        cancelWaterWave(now, true);
+        statusDisplay.textContent = '5th meteor impact: wave evaporated and cancelled';
+        return true;
+      }
+
+      statusDisplay.textContent = `Meteor impact ${waterMeteorHits}/5: water heating up`;
+      return true;
+    }
+
+    if (item.kind === 'acid-cloud') {
+      waterTint = 'green';
+      waterEffect.activeUntil = Math.max(waterEffect.activeUntil, now + 6000);
+      createWaterImpact(item, now);
+      statusDisplay.textContent = 'Acid cloud contaminated the wave: radioactive water';
+      return true;
+    }
+
     createWaterImpact(item, now);
     return true;
   }
@@ -459,6 +1453,11 @@ function absorbRainIntoWave(item, now) {
 
 function createWaterImpact(item, now = performance.now()) {
   const isMeteor = item.kind === 'lava-meteor';
+  const tint = item.kind === 'acid-cloud'
+    ? 'rgba(34, 197, 94, 0.58)'
+    : isMeteor
+      ? 'rgba(239, 68, 68, 0.52)'
+      : 'rgba(34, 197, 94, 0.46)';
   waterImpacts.push({
     kind: item.kind,
     x: item.x + item.width / 2,
@@ -466,14 +1465,14 @@ function createWaterImpact(item, now = performance.now()) {
     startedAt: now,
     endsAt: now + 2000,
     radius: isMeteor ? 24 : 20,
-    tint: isMeteor ? 'rgba(239, 68, 68, 0.52)' : 'rgba(34, 197, 94, 0.46)'
+    tint
   });
 }
 
 function updateEffectsDisplay(now = performance.now()) {
   const effects = [];
 
-  effects.push(`Paddle speed ${BreakoutUtils.toPercent(BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02))}%`);
+  effects.push(`Paddle speed ${BreakoutUtils.toPercent(getPaddleSpeedMultiplierForPhase(currentPhase))}%`);
   effects.push(`Hammers ${hammerCount}/3`);
   if (minigunCharges > 0) {
     effects.push(`Minigun ${minigunCharges}`);
@@ -526,6 +1525,18 @@ function updateEffectsDisplay(now = performance.now()) {
 
   if (paddleShieldUntil > now) {
     effects.push(`Shield ${(Math.ceil((paddleShieldUntil - now) / 100) / 10).toFixed(1)}s`);
+  }
+
+  if (bdodCharges > 0) {
+    effects.push(`BDOD charge ${bdodCharges}`);
+  }
+
+  if (bdodActiveUntil > now) {
+    effects.push(`BDOD active ${(Math.ceil((bdodActiveUntil - now) / 100) / 10).toFixed(1)}s`);
+  }
+
+  if (bdodCooldownUntil > now) {
+    effects.push(`BDOD cooldown ${(Math.ceil((bdodCooldownUntil - now) / 100) / 10).toFixed(1)}s`);
   }
 
   const activeTurret = turrets.filter((turret) => turret.endsAt > now);
@@ -585,6 +1596,11 @@ function emitFromTimedDropEmitter(emitter) {
   const x = emitter.originX + (Math.random() * 2 - 1) * spreadX;
   const y = emitter.fromTop ? -emitter.height : emitter.originY + (Math.random() * 2 - 1) * spreadY;
   const wobbleX = (Math.random() * 2 - 1) * 0.35;
+  let vx = emitter.driftX + wobbleX;
+  if (emitter.kind === 'lava-meteor') {
+    const diagonalDirection = Math.random() < 0.5 ? -1 : 1;
+    vx = diagonalDirection * (0.85 + Math.random() * 0.75) + wobbleX * 0.4;
+  }
 
   fallingItems.push({
     kind: emitter.kind,
@@ -593,7 +1609,7 @@ function emitFromTimedDropEmitter(emitter) {
     width: emitter.width,
     height: emitter.height,
     vy: emitter.vy,
-    vx: emitter.driftX + wobbleX,
+    vx,
     color: emitter.color
   });
 }
@@ -869,6 +1885,18 @@ function resetGame() {
   paddleOverdriveUntil = 0;
   hammerCount = 0;
   minigunCharges = 0;
+  bdodCharges = 0;
+  bdodActiveUntil = 0;
+  bdodCooldownUntil = 0;
+  bdodBlocksHitProgress = 0;
+  pendingRespawnSlow = false;
+  paddleBubbles = [];
+  waterMeteorHits = 0;
+  waterTint = 'normal';
+  waterEvaporation = { startedAt: 0, activeUntil: 0, surfaceY: 0 };
+  floweryState.phaseLostAt = null;
+  removeFloweryCompanion();
+  resetArcadeMinigameState();
   pausedAt = 0;
   phaseCountdownEndsAt = 0;
   autoLaunchAfterCountdown = false;
@@ -878,6 +1906,7 @@ function resetGame() {
   cowboyPairHitUntil = new Map();
   paddleFace = { deadEyes: false, nextBlinkAt: performance.now() + 2000, blinkUntil: 0 };
   spotlightEffect.activeUntil = 0;
+  bdodActiveUntil = 0;
   pauseButton.textContent = 'Pause';
   initializeRound();
   updateHud();
@@ -892,7 +1921,7 @@ function initializeRound() {
     height: 14,
     x: (canvas.width - 120) / 2,
     y: canvas.height - 28,
-    speed: basePaddleSpeed * BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02)
+    speed: basePaddleSpeed * getPaddleSpeedMultiplierForPhase(currentPhase)
   };
 
   balls = [createBall(canvas.width / 2, paddle.y - 14, 0, 0)];
@@ -926,6 +1955,8 @@ function initializeRound() {
   paddleOverdriveUntil = 0;
   turretBullets = [];
   fallingEmitters = [];
+  bdodActiveUntil = 0;
+  paddleBubbles = [];
   phaseCountdownEndsAt = 0;
   autoLaunchAfterCountdown = false;
   awaitingServe = false;
@@ -934,6 +1965,10 @@ function initializeRound() {
   cowboyPairHitUntil = new Map();
   paddleFace = { deadEyes: false, nextBlinkAt: performance.now() + 2000, blinkUntil: 0 };
   spotlightEffect.activeUntil = 0;
+  bdodActiveUntil = 0;
+  waterMeteorHits = 0;
+  waterTint = 'normal';
+  waterEvaporation = { startedAt: 0, activeUntil: 0, surfaceY: 0 };
   resetWeaponCycle();
 }
 
@@ -977,6 +2012,18 @@ function startGame() {
   paddleOverdriveUntil = 0;
   hammerCount = 0;
   minigunCharges = 0;
+  bdodCharges = 0;
+  bdodActiveUntil = 0;
+  bdodCooldownUntil = 0;
+  bdodBlocksHitProgress = 0;
+  pendingRespawnSlow = false;
+  paddleBubbles = [];
+  waterMeteorHits = 0;
+  waterTint = 'normal';
+  waterEvaporation = { startedAt: 0, activeUntil: 0, surfaceY: 0 };
+  floweryState.phaseLostAt = null;
+  removeFloweryCompanion();
+  resetArcadeMinigameState();
   pausedAt = 0;
   phaseCountdownEndsAt = 0;
   autoLaunchAfterCountdown = false;
@@ -1009,7 +2056,7 @@ function applySpecialBricks(created) {
   const blocked = new Set();
   const allIndices = created.map((_, index) => index);
 
-  if (currentPhase !== 3) {
+  if (currentPhase % 2 === 0) {
     pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
       applySpecialType(created[idx], 'cowboy');
     });
@@ -1041,7 +2088,9 @@ function applySpecialBricks(created) {
     applySpecialType(created[idx], 'evil');
   });
 
-  pickDistinctBrickIndices(allIndices, currentPhase, blocked).forEach((idx) => {
+  const maxDoubleHit = Math.floor(created.length * 0.5);
+  const doubleHitCount = Math.max(0, Math.min(currentPhase, maxDoubleHit));
+  pickDistinctBrickIndices(allIndices, doubleHitCount, blocked).forEach((idx) => {
     applySpecialType(created[idx], 'double-hit');
   });
 
@@ -1060,6 +2109,26 @@ function applySpecialBricks(created) {
   if (currentPhase % 2 === 0) {
     pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
       applySpecialType(created[idx], 'shield');
+    });
+  }
+
+  const shouldSpawnBdod = currentPhase % 2 === 0;
+  if (shouldSpawnBdod) {
+    pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
+      applySpecialType(created[idx], 'bdod');
+    });
+  }
+
+  if (currentPhase !== 5) {
+    pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
+      applySpecialType(created[idx], 'arcade');
+    });
+  }
+
+  const canSpawnFlowery = !floweryState.active && (floweryState.phaseLostAt == null || currentPhase - floweryState.phaseLostAt >= 3);
+  if (canSpawnFlowery) {
+    pickDistinctBrickIndices(allIndices, 1, blocked).forEach((idx) => {
+      applySpecialType(created[idx], 'flowery');
     });
   }
 }
@@ -1122,9 +2191,15 @@ function buildBricks() {
 
     const remainingAfterHeart = remainingAfterEvil.filter((index) => index !== heartIndex);
     const randomIndex = remainingAfterHeart[Math.floor(Math.random() * remainingAfterHeart.length)];
-    const phase3Specials = ['extra-ball', 'double-hit', 'mushroom', 'hammer'];
-    const randomType = phase3Specials[Math.floor(Math.random() * phase3Specials.length)];
+    const randomType = 'arcade';
     applySpecialType(bossBlocks[randomIndex], randomType);
+
+    const floweryCandidates = remainingAfterHeart.filter((index) => index !== randomIndex);
+    const canSpawnFlowery = !floweryState.active && (floweryState.phaseLostAt == null || currentPhase - floweryState.phaseLostAt >= 3);
+    if (canSpawnFlowery && floweryCandidates.length) {
+      const floweryIndex = floweryCandidates[Math.floor(Math.random() * floweryCandidates.length)];
+      applySpecialType(bossBlocks[floweryIndex], 'flowery');
+    }
 
     created.push(...bossBlocks);
     return created;
@@ -1187,7 +2262,7 @@ function startNextPhase() {
   phaseMultiplier = BreakoutUtils.getPhaseMultiplierFor(currentPhase, phaseGrowthEarly, phaseGrowthLate);
   phaseBallSpeed = baseBallSpeed * phaseMultiplier;
   if (paddle) {
-    paddle.speed = basePaddleSpeed * BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02);
+    paddle.speed = basePaddleSpeed * getPaddleSpeedMultiplierForPhase(currentPhase);
   }
   bricks = buildBricks();
   guns = buildGuns();
@@ -1241,9 +2316,14 @@ function startNextPhase() {
   cowboyPairSequence = 1;
   cowboyPairHitUntil = new Map();
   spotlightEffect.activeUntil = 0;
+  bdodActiveUntil = 0;
+  waterMeteorHits = 0;
+  waterTint = 'normal';
+  paddleBubbles = [];
+  resetArcadeMinigameState();
   resetWeaponCycle();
   updateHud();
-  statusDisplay.textContent = `${getPhaseTitle()} starts in 3... Paddle ${BreakoutUtils.toPercent(BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02))}%`;
+  statusDisplay.textContent = `${getPhaseTitle()} starts in 3... Paddle ${BreakoutUtils.toPercent(getPaddleSpeedMultiplierForPhase(currentPhase))}%`;
 }
 
 function updateHud(now = performance.now()) {
@@ -1259,9 +2339,14 @@ function launchBallRandom(ball = balls[0]) {
   const angleMax = -50;
   const angleDeg = angleMin + Math.random() * (angleMax - angleMin);
   const angle = (angleDeg * Math.PI) / 180;
-  const speed = phaseBallSpeed * (ball.speedFactor || 1);
+  const respawnSlow = pendingRespawnSlow ? 0.5 : 1;
+  const speed = phaseBallSpeed * (ball.speedFactor || 1) * respawnSlow;
   ball.vx = Math.cos(angle) * speed;
   ball.vy = Math.sin(angle) * speed;
+  if (pendingRespawnSlow) {
+    ball.respawnSlowUntil = performance.now() + 3000;
+    pendingRespawnSlow = false;
+  }
   paddleFace.deadEyes = false;
   paddleFace.blinkUntil = 0;
   paddleFace.nextBlinkAt = performance.now() + 2000;
@@ -1290,6 +2375,17 @@ function spawnDelayedExtraBall(originX, originY, sourceVx = 0, sourceVy = -phase
   balls.push(createBall(spawnPoint.x, spawnPoint.y, vx, vy));
 }
 
+function spawnAngelRescueBall(now = performance.now()) {
+  const rescueBall = createBall(canvas.width / 2, -18, 0, 2.6, 8, 1);
+  rescueBall.angelWingsUntil = now + 4500;
+  rescueBall.radioactiveWaterMutated = false;
+  rescueBall.radioactiveWaterNextShiftAt = now + 2000;
+  rescueBall.radioactiveWaterCycle = 0;
+  balls = [rescueBall];
+  awaitingServe = false;
+  paddleInvulnerableUntil = Math.max(paddleInvulnerableUntil, now + 1200);
+}
+
 function loseLife(messageOnSurvive) {
   const now = performance.now();
   const ignoreInvulnerability = messageOnSurvive === 'Ball lost';
@@ -1301,6 +2397,10 @@ function loseLife(messageOnSurvive) {
   }
 
   lives = Math.max(0, lives - 1);
+  if (floweryState.active) {
+    floweryState.phaseLostAt = currentPhase;
+    removeFloweryCompanion();
+  }
   paddleFace.deadEyes = true;
   updateHud();
   bullets = [];
@@ -1318,6 +2418,7 @@ function loseLife(messageOnSurvive) {
   balls = [createBall(paddle.x + paddle.width / 2, paddle.y - 14, 0, 0)];
   paddleInvulnerableUntil = now + 2500;
   awaitingServe = true;
+  pendingRespawnSlow = true;
   statusDisplay.textContent = `${messageOnSurvive} — press Enter to continue`;
   return false;
 }
@@ -1374,7 +2475,10 @@ function updateCowboyBullets(now, delta) {
   };
 
   entitiesModule.updateCowboyBullets(now, delta, state, {
-    loseLife
+    loseLife: (message) => {
+      if (interceptBdodDamage(now, 'cowboy shot')) return;
+      loseLife(message);
+    }
   });
 
   cowboyBullets = state.cowboyBullets;
@@ -1486,6 +2590,9 @@ function triggerSpecialEffect(type, context = {}) {
     spawnLavaRain,
     spawnFallingItem,
     activateSpotlight,
+    startArcadeMinigame,
+    spawnFloweryCompanion,
+    onBdodBlockBroken,
     setStatus: (text) => {
       statusDisplay.textContent = text;
     }
@@ -1749,6 +2856,10 @@ function handleBrickCollision(ball, brick, previousBallX, previousBallY, spawned
     });
   }
 
+  if (ball.cowboyDecor) {
+    ball.cowboyShockUntil = now + 500;
+  }
+
   const previousLeft = previousBallX - ball.radius;
   const previousRight = previousBallX + ball.radius;
   const previousTop = previousBallY - ball.radius;
@@ -1788,12 +2899,12 @@ function handlePhaseCountdown(now) {
 
   const remaining = Math.ceil((phaseCountdownEndsAt - now) / 1000);
   if (remaining > 0) {
-    statusDisplay.textContent = `${getPhaseTitle()} starts in ${remaining}... Paddle ${BreakoutUtils.toPercent(BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02))}%`;
+    statusDisplay.textContent = `${getPhaseTitle()} starts in ${remaining}... Paddle ${BreakoutUtils.toPercent(getPaddleSpeedMultiplierForPhase(currentPhase))}%`;
     return false;
   }
 
   phaseCountdownEndsAt = 0;
-  statusDisplay.textContent = `${getPhaseTitle()} — ball ${BreakoutUtils.toPercent(phaseMultiplier)}% | paddle ${BreakoutUtils.toPercent(BreakoutUtils.getPaddleSpeedMultiplierFor(currentPhase, 1.02))}%`;
+  statusDisplay.textContent = `${getPhaseTitle()} — ball ${BreakoutUtils.toPercent(phaseMultiplier)}% | paddle ${BreakoutUtils.toPercent(getPaddleSpeedMultiplierForPhase(currentPhase))}%`;
   if (autoLaunchAfterCountdown) {
     launchBallRandom();
     autoLaunchAfterCountdown = false;
@@ -1806,6 +2917,7 @@ function updatePreBallSystems(now, delta) {
   updateTurrets(now);
   updateEvilHands(now, delta);
   updateCowboyOutlaws(now, delta);
+  updateFlowerySystem(now, delta);
   updateDeceptivePhase(now);
   updateDeceptiveGuessShots(now, delta);
 
@@ -1818,13 +2930,7 @@ function updatePreBallSystems(now, delta) {
   }
 
   if (waterEffect.activeUntil > 0 && now >= waterEffect.activeUntil) {
-    waterEffect.activeUntil = 0;
-    waterEffect.startedAt = 0;
-    waterEffect.surgeUntil = 0;
-    waterEffect.rowsCurrent = waterEffect.levelRows;
-    waterEffect.rowsFrom = waterEffect.levelRows;
-    waterEffect.rowsTo = waterEffect.levelRows;
-    waterEffect.rowsTransitionStartedAt = 0;
+    cancelWaterWave(now, false);
   }
 }
 
@@ -1836,8 +2942,14 @@ function updatePaddleMovementAndWeapons(now, delta) {
   }
 
   const waterActive = isWaterEffectActive(now);
-  const snareFactor = paddleSnaredUntil > now ? 0.15 : 1;
-  const paddleSpeedFactor = getWaterSlowFactor(now) * snareFactor * (paddleOverdriveUntil > now ? 1.15 : 1);
+  const shieldActive = paddleShieldUntil > now;
+  const snareFactor = paddleSnaredUntil > now && !shieldActive ? 0.15 : 1;
+  const bdodFactor = isBdodActive(now) ? 0.1 : 1;
+  const overdriveFactor = paddleOverdriveUntil > now ? 1.15 : 1;
+  const flowerySprintFactor = isFlowerySprintActive() ? 1.35 : 1;
+  const waveWaterFactor = waterActive ? (waterTint === 'green' ? 0.8 : 1) : 1;
+  const paddleSpeedFactor = waveWaterFactor * (waterActive ? 1 : snareFactor * overdriveFactor * bdodFactor) * flowerySprintFactor;
+  const previousPaddleX = paddle.x;
 
   if (keys.ArrowLeft) {
     paddle.x = Math.max(0, paddle.x - paddle.speed * paddleSpeedFactor * delta);
@@ -1845,6 +2957,24 @@ function updatePaddleMovementAndWeapons(now, delta) {
   if (keys.ArrowRight) {
     paddle.x = Math.min(canvas.width - paddle.width, paddle.x + paddle.speed * paddleSpeedFactor * delta);
   }
+
+  if (waterActive && Math.abs(paddle.x - previousPaddleX) > 0.2) {
+    paddleBubbles.push({
+      x: paddle.x + paddle.width / 2 + (Math.random() - 0.5) * 20,
+      y: paddle.y + paddle.height - 2,
+      radius: 2 + Math.random() * 2.8,
+      vx: (Math.random() - 0.5) * 0.2,
+      vy: 0.9 + Math.random() * 0.8,
+      startedAt: now,
+      endsAt: now + 540 + Math.random() * 360
+    });
+  }
+
+  paddleBubbles = paddleBubbles.filter((bubble) => {
+    bubble.x += bubble.vx * delta;
+    bubble.y -= bubble.vy * delta;
+    return bubble.endsAt > now;
+  });
 
   updateMobileWeapons(delta);
   updateWeaponFire(now);
@@ -1881,6 +3011,7 @@ function updateProjectilesAndFallingItems(now, delta, waterActive) {
       bullet.y + bullet.radius > paddle.y &&
       bullet.y - bullet.radius < paddle.y + paddle.height
     ) {
+      if (interceptBdodDamage(now, 'bullet')) return false;
       loseLife('Bullet hit! Life lost');
       return false;
     }
@@ -1922,6 +3053,12 @@ function updateProjectilesAndFallingItems(now, delta, waterActive) {
 
       brick.alive = false;
       score += Math.round(8 * phaseMultiplier);
+      triggerSpecialEffect(brick.type, {
+        now,
+        brick,
+        sourceVx: bullet.vx,
+        sourceVy: bullet.vy
+      });
       updateHud(now);
       return false;
     }
@@ -1954,6 +3091,7 @@ function updateProjectilesAndFallingItems(now, delta, waterActive) {
 
     if (intersectsPaddle) {
       if (item.kind === 'harm-drop' || item.kind === 'nuclear-drop' || item.kind === 'lava-drop' || item.kind === 'rain-drop' || item.kind === 'acid-cloud' || item.kind === 'lava-meteor') {
+        if (interceptBdodDamage(now, item.kind)) return false;
         loseLife('Toxic drop hit! Life lost');
       } else if (item.kind === 'mushroom') {
         applyMushroomBoost(now);
@@ -1973,6 +3111,10 @@ function updateProjectilesAndFallingItems(now, delta, waterActive) {
       } else if (item.kind === 'shield') {
         paddleShieldUntil = now + 15000;
         statusDisplay.textContent = 'Shield active for 15s';
+      } else if (item.kind === 'bdod-token') {
+        bdodCharges += 1;
+        statusDisplay.textContent = 'BDOD armed. Press Arrow Down to enter BDOD mode (1.5s).';
+        updateHud(now);
       }
       return false;
     }
@@ -2015,21 +3157,54 @@ function updateBallsAndPhaseProgression(now, delta, waterActive) {
     const ballInWater = waterActive && ball.y + ball.radius >= waterSurfaceY;
     const ballWaterFactor = ballInWater ? getWaterSlowFactor(now) : 1;
     const malignFactor = ball.malignBoostEndsAt && ball.malignBoostEndsAt > now ? 1.15 : 1;
+    const respawnSlowFactor = ball.respawnSlowUntil && ball.respawnSlowUntil > now ? 0.5 : 1;
 
-    ball.x += ball.vx * delta * ballWaterFactor * malignFactor;
-    ball.y += ball.vy * delta * ballWaterFactor * malignFactor;
+    if (ballInWater && waterTint === 'green') {
+      if (!ball.radioactiveWaterNextShiftAt) {
+        ball.radioactiveWaterNextShiftAt = now + 2000;
+        ball.radioactiveWaterCycle = 0;
+      }
+      if (now >= ball.radioactiveWaterNextShiftAt) {
+        ball.radioactiveWaterCycle = (ball.radioactiveWaterCycle || 0) % radioactiveWaterSpeedCycle.length;
+        const multiplier = radioactiveWaterSpeedCycle[ball.radioactiveWaterCycle];
+        const targetSpeed = phaseBallSpeed * (ball.speedFactor || 1) * multiplier;
+        const currentSpeed = Math.hypot(ball.vx, ball.vy) || 1;
+        const scale = targetSpeed / currentSpeed;
+        ball.vx *= scale;
+        ball.vy *= scale;
+        ball.radioactiveWaterCycle = (ball.radioactiveWaterCycle + 1) % radioactiveWaterSpeedCycle.length;
+        ball.radioactiveWaterNextShiftAt = now + 2000;
+      }
+      ball.radioactiveWaterMutated = true;
+    } else {
+      ball.radioactiveWaterMutated = false;
+      delete ball.radioactiveWaterNextShiftAt;
+      delete ball.radioactiveWaterCycle;
+    }
+
+    ball.x += ball.vx * delta * ballWaterFactor * malignFactor * respawnSlowFactor;
+    ball.y += ball.vy * delta * ballWaterFactor * malignFactor * respawnSlowFactor;
 
     if (ball.x - ball.radius <= 0) {
       ball.x = ball.radius;
       ball.vx = Math.abs(ball.vx);
+      if (ball.cowboyDecor) {
+        ball.cowboyShockUntil = now + 500;
+      }
     } else if (ball.x + ball.radius >= canvas.width) {
       ball.x = canvas.width - ball.radius;
       ball.vx = -Math.abs(ball.vx);
+      if (ball.cowboyDecor) {
+        ball.cowboyShockUntil = now + 500;
+      }
     }
 
     if (ball.y - ball.radius <= 0) {
       ball.y = ball.radius;
       ball.vy = Math.abs(ball.vy);
+      if (ball.cowboyDecor) {
+        ball.cowboyShockUntil = now + 500;
+      }
     }
 
     if (
@@ -2043,6 +3218,11 @@ function updateBallsAndPhaseProgression(now, delta, waterActive) {
         mushroomBounceStartedAt = now;
         mushroomBounceUntil = now + 360;
       }
+
+      if (ball.cowboyDecor) {
+        ball.cowboyShockUntil = now + 500;
+      }
+
       ball.y = paddle.y - ball.radius;
       const hitPosition = (ball.x - (paddle.x + paddle.width / 2)) / (paddle.width / 2);
       const minBallSpeed = phaseBallSpeed * (ball.speedFactor || 1);
@@ -2091,6 +3271,13 @@ function updateBallsAndPhaseProgression(now, delta, waterActive) {
   balls = survivingBalls.concat(spawnedBalls);
 
   if (ballsLostThisFrame > 0 && survivingBalls.length === 0 && spawnedBalls.length === 0 && gameState === 'running') {
+    if (paddleShieldUntil > now) {
+      paddleShieldUntil = 0;
+      spawnAngelRescueBall(now);
+      updateHud(now);
+      statusDisplay.textContent = 'Shield sacrifice: angel rescue ball descended from the sky';
+      return false;
+    }
     loseLife('Ball lost');
     return false;
   }
@@ -2112,6 +3299,11 @@ function update(delta) {
   if (gameState !== 'running' || paused) return;
 
   const now = performance.now();
+
+  if (updateArcadeMinigame(now, delta)) {
+    return;
+  }
+
   resolveRouletteEffects(now);
   updateEffectsDisplay(now);
 
@@ -2139,10 +3331,16 @@ function update(delta) {
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+  if (arcadeMinigame.mode !== 'idle') {
+    drawArcadeMinigameOverlay();
+    return;
+  }
+
   ctx.fillStyle = '#020617';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   drawWaterEffect();
+  drawWaterEvaporation();
   drawBricks();
   drawCowboyOutlaws();
   drawRadioactiveZones();
@@ -2155,10 +3353,15 @@ function draw() {
   drawTurretBullets();
   drawGuessShots();
   drawTurrets();
+  drawFloweryCompanion();
   drawPaddle();
   drawBalls();
   drawWaterImpacts();
+  drawPaddleBubbles();
   drawHammerInventory();
+  drawBdodBlocksCounter();
+  drawFloweryStaminaBar();
+  drawBdodHud();
   drawSpotlightCone();
   drawDeceptiveHint();
   drawPhaseCountdownOverlay();
@@ -2176,6 +3379,58 @@ function drawPaddle() {
   const isBoosted = paddleBoostEndsAt > performance.now();
   const now = performance.now();
   const invulnerableRemaining = Math.max(0, getPaddleInvulnerableUntil() - now);
+
+  if (isWaterEffectActive(now)) {
+    ctx.fillStyle = '#0f766e';
+    ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
+    ctx.fillStyle = '#14b8a6';
+    ctx.fillRect(paddle.x + 6, paddle.y + 2, paddle.width - 12, paddle.height - 4);
+    ctx.strokeStyle = '#ccfbf1';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(paddle.x + 4, paddle.y + 1, paddle.width - 8, paddle.height - 2);
+    ctx.lineWidth = 1;
+
+    ctx.fillStyle = '#082f49';
+    ctx.fillRect(paddle.x + paddle.width * 0.18, paddle.y + 3, paddle.width * 0.64, 4);
+
+    const gogglesY = paddle.y + paddle.height / 2;
+    const leftLensX = paddle.x + paddle.width * 0.38;
+    const rightLensX = paddle.x + paddle.width * 0.62;
+    const lensRadius = Math.max(3.2, paddle.height * 0.24);
+
+    ctx.fillStyle = '#0c4a6e';
+    ctx.beginPath();
+    ctx.arc(leftLensX, gogglesY, lensRadius, 0, Math.PI * 2);
+    ctx.arc(rightLensX, gogglesY, lensRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = '#facc15';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(leftLensX, gogglesY, lensRadius + 1, 0, Math.PI * 2);
+    ctx.arc(rightLensX, gogglesY, lensRadius + 1, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#facc15';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(rightLensX + lensRadius + 1, gogglesY - 1);
+    ctx.lineTo(rightLensX + lensRadius + 1, paddle.y - 10);
+    ctx.lineTo(rightLensX - 1, paddle.y - 10);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+
+    if (invulnerableRemaining > 0) {
+      const seconds = (Math.ceil(invulnerableRemaining / 100) / 10).toFixed(1);
+      ctx.fillStyle = '#dbeafe';
+      ctx.font = 'bold 12px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText(seconds, paddle.x + paddle.width / 2, paddle.y - 8);
+    }
+
+    drawPaddleEyes(false);
+    return;
+  }
 
   if (invulnerableRemaining > 0) {
     ctx.fillStyle = '#1e3a8a';
@@ -2208,6 +3463,11 @@ function drawPaddle() {
   if (!isBoosted) {
     ctx.fillStyle = '#38bdf8';
     ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
+    if (isFlowerySprintActive()) {
+      const hue = (performance.now() * 0.22) % 360;
+      ctx.fillStyle = `hsla(${hue}, 90%, 60%, 0.62)`;
+      ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
+    }
     drawPaddleEyes(false);
     return;
   }
@@ -2238,7 +3498,105 @@ function drawPaddle() {
   ctx.arc(capX + capWidth * 0.58, capY + 3, 2.1, 0, Math.PI * 2);
   ctx.arc(capX + capWidth * 0.73, capY + 4.2, 2.5, 0, Math.PI * 2);
   ctx.fill();
+  if (isFlowerySprintActive()) {
+    const hue = (performance.now() * 0.22) % 360;
+    ctx.fillStyle = `hsla(${hue}, 90%, 60%, 0.45)`;
+    ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
+  }
   drawPaddleEyes(true);
+}
+
+function drawFloweryCompanion() {
+  if (!floweryState.active || !floweryState.flower) return;
+  const flower = floweryState.flower;
+  const petalCount = 8;
+  const petalRadius = 5.2;
+  const centerRadius = 4.3;
+  const spin = flower.petalSpin || 0;
+
+  for (let i = 0; i < petalCount; i += 1) {
+    const angle = spin + (i / petalCount) * Math.PI * 2;
+    const px = flower.x + Math.cos(angle) * 8;
+    const py = flower.y + Math.sin(angle) * 8;
+    ctx.fillStyle = '#fef9c3';
+    ctx.beginPath();
+    ctx.arc(px, py, petalRadius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(flower.x, flower.y, centerRadius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#111827';
+  ctx.beginPath();
+  ctx.arc(flower.x - 1.5, flower.y - 1, 0.8, 0, Math.PI * 2);
+  ctx.arc(flower.x + 1.5, flower.y - 1, 0.8, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(flower.x, flower.y + 0.5, 2, 0.15 * Math.PI, 0.85 * Math.PI);
+  ctx.stroke();
+}
+
+function drawFloweryStaminaBar() {
+  if (!floweryState.active || !floweryState.flower || floweryState.flower.mode !== 'attached') return;
+
+  const x = 16;
+  const y = 54;
+  const width = 248;
+  const height = 18;
+
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.78)';
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeStyle = '#f8fafc';
+  ctx.strokeRect(x, y, width, height);
+
+  const fillWidth = Math.floor((width - 2) * (floweryState.stamina / 100));
+  if (fillWidth > 0) {
+    if (isFlowerySprintActive()) {
+      const hue = (performance.now() * 0.22) % 360;
+      ctx.fillStyle = `hsl(${hue}, 90%, 60%)`;
+    } else {
+      ctx.fillStyle = '#4ade80';
+    }
+    ctx.fillRect(x + 1, y + 1, fillWidth, height - 2);
+  }
+
+  const decoFlowers = 6;
+  for (let i = 0; i < decoFlowers; i += 1) {
+    const fx = x + 8 + i * 39;
+    const fy = y - 8;
+    for (let p = 0; p < 6; p += 1) {
+      const a = (p / 6) * Math.PI * 2;
+      ctx.fillStyle = '#fef9c3';
+      ctx.beginPath();
+      ctx.arc(fx + Math.cos(a) * 3.3, fy + Math.sin(a) * 3.3, 1.7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(fx, fy, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = 'bold 12px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText(`Flowery ${floweryState.stamina}%`, x + 6, y + 13);
+}
+
+function drawBdodBlocksCounter() {
+  const remaining = Math.max(0, 2 - bdodBlocksHitProgress);
+  const x = canvas.width - 162;
+  const y = 36;
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
+  ctx.fillRect(x, y, 152, 20);
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.strokeRect(x, y, 152, 20);
+  ctx.fillStyle = '#f8fafc';
+  ctx.font = 'bold 11px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText(`BDOD life in: ${remaining} blocks`, x + 6, y + 14);
 }
 
 function drawPaddleEyes(isMushroom) {
@@ -2293,6 +3651,35 @@ function drawPaddleEyes(isMushroom) {
     return;
   }
 
+  const deceptiveBallHidden = currentPhase === 5 && balls.some((ball) => ball.deceptiveFrozen);
+  if (deceptiveBallHidden) {
+    function drawSpiral(ex, ey, spinSign) {
+      const maxRadius = eyeRadius * 0.82;
+      const startAngle = (now * 0.012 * spinSign) % (Math.PI * 2);
+      ctx.strokeStyle = '#111827';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      for (let i = 0; i <= 44; i += 1) {
+        const t = i / 44;
+        const radius = t * maxRadius;
+        const angle = startAngle + spinSign * t * Math.PI * 3.4;
+        const sx = ex + Math.cos(angle) * radius;
+        const sy = ey + Math.sin(angle) * radius;
+        if (i === 0) {
+          ctx.moveTo(sx, sy);
+        } else {
+          ctx.lineTo(sx, sy);
+        }
+      }
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+
+    drawSpiral(leftEyeX, eyeY, 1);
+    drawSpiral(rightEyeX, eyeY, -1);
+    return;
+  }
+
   const target = balls.find((ball) => !ball.deceptiveFrozen) || balls[0];
   const tx = target ? target.x : paddle.x + paddle.width / 2;
   const ty = target ? target.y : paddle.y;
@@ -2319,9 +3706,21 @@ function drawBalls() {
   balls.forEach((ball) => {
     if (ball.deceptiveFrozen && currentPhase === 5) return;
 
-    const activeBoost = (ball.nuclearBoostEndsAt && ball.nuclearBoostEndsAt > performance.now()) || ball.radioactive;
+    const now = performance.now();
+    const activeBoost = (ball.nuclearBoostEndsAt && ball.nuclearBoostEndsAt > now) || ball.radioactive;
+    const jitterX = ball.radioactiveWaterMutated ? Math.sin(now * 0.055 + ball.x * 0.09) * 1.9 : 0;
+    const jitterY = ball.radioactiveWaterMutated ? Math.cos(now * 0.061 + ball.y * 0.07) * 1.6 : 0;
+    const drawX = ball.x + jitterX;
+    const drawY = ball.y + jitterY;
+    const deformX = ball.radioactiveWaterMutated ? 1 + Math.sin(now * 0.01 + ball.x * 0.02) * 0.18 : 1;
+    const deformY = ball.radioactiveWaterMutated ? 1 - Math.sin(now * 0.01 + ball.y * 0.02) * 0.12 : 1;
+
     ctx.beginPath();
-    ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+    if (ball.radioactiveWaterMutated) {
+      ctx.ellipse(drawX, drawY, ball.radius * deformX, ball.radius * deformY, 0, 0, Math.PI * 2);
+    } else {
+      ctx.arc(drawX, drawY, ball.radius, 0, Math.PI * 2);
+    }
     ctx.fillStyle = ball.cowboyDecor ? '#d6b38a' : activeBoost ? '#22c55e' : '#f8fafc';
     ctx.fill();
 
@@ -2332,16 +3731,32 @@ function drawBalls() {
       ctx.lineWidth = 1;
     }
 
+    if (ball.angelWingsUntil && ball.angelWingsUntil > now) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.beginPath();
+      ctx.ellipse(drawX - ball.radius - 4, drawY, 6, 3.5, -0.4, 0, Math.PI * 2);
+      ctx.ellipse(drawX + ball.radius + 4, drawY, 6, 3.5, 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(254, 240, 138, 0.9)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(drawX - 4.5, drawY - ball.radius - 6);
+      ctx.lineTo(drawX + 4.5, drawY - ball.radius - 6);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+
     if (ball.cowboyDecor) {
-      const hatScale = Math.max(1.84, ball.radius * 0.102);
-      const spin = (performance.now() * 0.01 + ball.x * 0.03) % (Math.PI * 2);
-      drawCowboyHat(ball.x, ball.y - ball.radius - 6, hatScale);
-      drawCowboyRevolvers(ball.x, ball.y + 1, {
-        scale: Math.max(0.85, ball.radius * 0.07),
-        spread: ball.radius + 7,
+      const spin = (now * 0.01 + ball.x * 0.03) % (Math.PI * 2);
+      drawCowboyHat(drawX, drawY - ball.radius - 14, 1.84);
+      drawCowboyRevolvers(drawX, drawY + 5, {
+        scale: 1.6,
+        spread: ball.radius + 14,
         spin
       });
-      drawCowboyFace(ball.x, ball.y + 1, Math.max(4.8, ball.radius * 0.56), 'happy');
+      const cowboyBallMood = ball.cowboyShockUntil && ball.cowboyShockUntil > now ? 'shock' : 'happy';
+      const cowboyFaceRadius = Math.max(5.6, ball.radius * 0.58);
+      drawCowboyFace(drawX, drawY + 1, cowboyFaceRadius, cowboyBallMood);
     }
   });
 }
@@ -2390,6 +3805,15 @@ function drawBricks() {
       ctx.font = 'bold 12px Arial';
       ctx.textAlign = 'center';
       ctx.fillText(`${brick.hp}x`, brick.x + brick.width / 2, brick.y + brick.height / 2 + 4);
+    } else if (brick.type === 'bdod') {
+      if (bdodSprite.complete && bdodSprite.naturalWidth > 0) {
+        ctx.drawImage(bdodSprite, brick.x + 2, brick.y + 2, brick.width - 4, brick.height - 4);
+      } else {
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = 'bold 11px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('BDOD', brick.x + brick.width / 2, brick.y + brick.height / 2 + 4);
+      }
     } else if (brick.type === 'extra-ball') {
       ctx.fillStyle = '#083344';
       ctx.beginPath();
@@ -2496,7 +3920,7 @@ function drawBricks() {
       ctx.fillStyle = '#d6b38a';
       ctx.fillRect(brick.x + 2, brick.y + 2, brick.width - 4, brick.height - 4);
       drawCowboyHat(cx, brick.y - 1, 1.6);
-      drawCowboyFace(cx, cy + 1, 8, 'happy');
+      drawCowboyFace(cx, cy + 1, 8, 'angry');
     } else if (brick.type === 'flashlight') {
       const cx = brick.x + brick.width / 2;
       const cy = brick.y + brick.height / 2;
@@ -2515,28 +3939,74 @@ function drawBricks() {
     } else if (brick.type === 'meteor') {
       const cx = brick.x + brick.width / 2;
       const cy = brick.y + brick.height / 2;
-      const meteorScale = 1.9;
+      const meteorScale = Math.max(0.7, Math.min(brick.width / 72, brick.height / 30) * 1.22);
+      const clipInset = 2;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(brick.x + clipInset, brick.y + clipInset, brick.width - clipInset * 2, brick.height - clipInset * 2);
+      ctx.clip();
       const flamePulse = 0.75 + Math.sin(now * 0.02 + brick.x * 0.07) * 0.25;
-      ctx.fillStyle = '#f97316';
+      ctx.fillStyle = '#334155';
       ctx.beginPath();
       ctx.arc(cx, cy, 8 * meteorScale, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#dc2626';
+      ctx.fillStyle = '#0f172a';
       ctx.beginPath();
       ctx.arc(cx + 2 * meteorScale, cy - 2 * meteorScale, 3 * meteorScale, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = `rgba(251, 146, 60, ${0.65 + flamePulse * 0.25})`;
+      ctx.fillStyle = `rgba(56, 189, 248, ${0.65 + flamePulse * 0.25})`;
       ctx.beginPath();
       ctx.moveTo(cx - 6 * meteorScale, cy - 5 * meteorScale);
       ctx.quadraticCurveTo(cx - 2 * meteorScale, cy - 13 * meteorScale - flamePulse * 3, cx, cy - 8 * meteorScale);
       ctx.quadraticCurveTo(cx + 2 * meteorScale, cy - 14 * meteorScale - flamePulse * 3, cx + 6 * meteorScale, cy - 5 * meteorScale);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = `rgba(254, 215, 170, ${0.5 + flamePulse * 0.3})`;
+      ctx.fillStyle = `rgba(186, 230, 253, ${0.5 + flamePulse * 0.3})`;
       ctx.beginPath();
       ctx.moveTo(cx - 2.6 * meteorScale, cy - 6 * meteorScale);
       ctx.quadraticCurveTo(cx, cy - 11 * meteorScale - flamePulse * 2.5, cx + 2.6 * meteorScale, cy - 6 * meteorScale);
       ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    } else if (brick.type === 'arcade') {
+      const cx = brick.x + brick.width / 2;
+      const cy = brick.y + brick.height / 2 + 1;
+      const bodyW = Math.max(24, brick.width - 16);
+      const bodyH = Math.max(10, brick.height - 10);
+
+      ctx.fillStyle = '#e2e8f0';
+      ctx.beginPath();
+      addRoundedRectPath(ctx, cx - bodyW / 2, cy - bodyH / 2, bodyW, bodyH, 6);
+      ctx.fill();
+      ctx.strokeStyle = '#94a3b8';
+      ctx.stroke();
+
+      ctx.fillStyle = '#0f172a';
+      ctx.beginPath();
+      ctx.arc(cx - bodyW * 0.18, cy, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(cx - bodyW * 0.23, cy, 1.2, 0, Math.PI * 2);
+      ctx.arc(cx - bodyW * 0.13, cy, 1.2, 0, Math.PI * 2);
+      ctx.arc(cx - bodyW * 0.18, cy - 4, 1.2, 0, Math.PI * 2);
+      ctx.arc(cx - bodyW * 0.18, cy + 4, 1.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(cx + bodyW * 0.2, cy - 3, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#22c55e';
+      ctx.beginPath();
+      ctx.arc(cx + bodyW * 0.25, cy + 2, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#3b82f6';
+      ctx.beginPath();
+      ctx.arc(cx + bodyW * 0.15, cy + 2, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#f59e0b';
+      ctx.beginPath();
+      ctx.arc(cx + bodyW * 0.2, cy + 6, 1.4, 0, Math.PI * 2);
       ctx.fill();
     } else if (brick.type === 'shield') {
       const cx = brick.x + brick.width / 2;
@@ -2558,7 +4028,7 @@ function drawBricks() {
 }
 
 function getCowboyMood(outlaw) {
-  if (outlaw.state === 'idle') return 'happy';
+  if (outlaw.state === 'idle') return 'angry';
   if (outlaw.hits >= 2) return 'happy';
   if (outlaw.hits === 1) return 'less-angry';
   return 'angry';
@@ -2620,14 +4090,14 @@ function drawEvilHands() {
     const centerY = hand.y + hand.height * 0.56;
 
     ctx.beginPath();
-    ctx.roundRect(hand.x + 4, hand.y + 11, hand.width - 8, hand.height - 11, 7);
+    addRoundedRectPath(ctx, hand.x + 4, hand.y + 11, hand.width - 8, hand.height - 11, 7);
     ctx.fill();
     ctx.stroke();
 
     for (let i = 0; i < 4; i += 1) {
       const fingerX = hand.x + 4 + i * 4.9;
       ctx.beginPath();
-      ctx.roundRect(fingerX, hand.y + (i % 2 ? 0 : 1), 4, 17 - (i % 2), 3);
+      addRoundedRectPath(ctx, fingerX, hand.y + (i % 2 ? 0 : 1), 4, 17 - (i % 2), 3);
       ctx.fill();
       ctx.stroke();
     }
@@ -2720,12 +4190,31 @@ function drawWaterEffect() {
 
   const surge = isWaveSurgeActive(now);
   const gradient = ctx.createLinearGradient(0, surfaceY, 0, canvas.height);
-  gradient.addColorStop(0, surge ? 'rgba(45, 212, 191, 0.46)' : 'rgba(56, 189, 248, 0.32)');
-  gradient.addColorStop(1, surge ? 'rgba(6, 78, 59, 0.7)' : 'rgba(8, 47, 73, 0.62)');
+
+  let topColor = surge ? 'rgba(45, 212, 191, 0.46)' : 'rgba(56, 189, 248, 0.32)';
+  let bottomColor = surge ? 'rgba(6, 78, 59, 0.7)' : 'rgba(8, 47, 73, 0.62)';
+
+  if (waterTint === 'red') {
+    const intensity = Math.max(0.2, Math.min(0.95, waterMeteorHits / 5));
+    topColor = `rgba(248, 113, 113, ${0.28 + intensity * 0.34})`;
+    bottomColor = `rgba(127, 29, 29, ${0.42 + intensity * 0.34})`;
+  } else if (waterTint === 'green') {
+    topColor = 'rgba(74, 222, 128, 0.46)';
+    bottomColor = 'rgba(20, 83, 45, 0.76)';
+  }
+
+  gradient.addColorStop(0, topColor);
+  gradient.addColorStop(1, bottomColor);
   ctx.fillStyle = gradient;
   ctx.fillRect(0, surfaceY, canvas.width, height);
 
-  ctx.strokeStyle = surge ? 'rgba(110, 231, 183, 0.95)' : 'rgba(186, 230, 253, 0.9)';
+  if (waterTint === 'red') {
+    ctx.strokeStyle = 'rgba(252, 165, 165, 0.95)';
+  } else if (waterTint === 'green') {
+    ctx.strokeStyle = 'rgba(187, 247, 208, 0.96)';
+  } else {
+    ctx.strokeStyle = surge ? 'rgba(110, 231, 183, 0.95)' : 'rgba(186, 230, 253, 0.9)';
+  }
   ctx.lineWidth = 2;
   ctx.beginPath();
   for (let x = 0; x <= canvas.width; x += 8) {
@@ -2738,6 +4227,30 @@ function drawWaterEffect() {
   }
   ctx.stroke();
   ctx.lineWidth = 1;
+}
+
+function drawWaterEvaporation() {
+  const now = performance.now();
+  if (waterEvaporation.activeUntil <= now) return;
+
+  const duration = Math.max(1, waterEvaporation.activeUntil - waterEvaporation.startedAt);
+  const elapsed = Math.max(0, now - waterEvaporation.startedAt);
+  const t = Math.max(0, Math.min(1, elapsed / duration));
+  const baseY = waterEvaporation.surfaceY - t * 32;
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (let i = 0; i < 18; i += 1) {
+    const lane = i / 17;
+    const x = lane * canvas.width + Math.sin(now * 0.01 + i) * 9;
+    const y = baseY - (i % 4) * 8 - t * 18;
+    const radius = 10 + (i % 3) * 4 + t * 8;
+    ctx.fillStyle = `rgba(248, 250, 252, ${(1 - t) * (0.08 + (i % 5) * 0.02)})`;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawGuns() {
@@ -2758,6 +4271,18 @@ function drawCowboyBullets() {
 function drawWaterImpacts() {
   if (!drawEffectsModule) return;
   waterImpacts = drawEffectsModule.drawWaterImpacts(ctx, waterImpacts);
+}
+
+function drawPaddleBubbles() {
+  const now = performance.now();
+  paddleBubbles = paddleBubbles.filter((bubble) => bubble.endsAt > now);
+  paddleBubbles.forEach((bubble) => {
+    const life = Math.max(0, Math.min(1, (bubble.endsAt - now) / Math.max(1, bubble.endsAt - bubble.startedAt)));
+    ctx.fillStyle = `rgba(186, 230, 253, ${0.2 + life * 0.65})`;
+    ctx.beginPath();
+    ctx.arc(bubble.x, bubble.y, bubble.radius * (0.6 + life * 0.8), 0, Math.PI * 2);
+    ctx.fill();
+  });
 }
 
 function drawTurretBullets() {
@@ -2800,8 +4325,14 @@ function drawHammerInventory() {
 function drawFallingItems() {
   if (!drawEffectsModule) return;
   drawEffectsModule.drawFallingItems(ctx, fallingItems, {
-    drawHeartShape
+    drawHeartShape,
+    bdodSprite
   });
+}
+
+function drawBdodHud() {
+  if (!drawEffectsModule) return;
+  drawEffectsModule.drawBdodHud(ctx, bdodCharges, bdodActiveUntil, bdodSprite);
 }
 
 function drawPhaseCountdownOverlay() {
@@ -2847,6 +4378,12 @@ function loop(timestamp) {
 
   const delta = Math.min((timestamp - lastTime) / 16.67, 2);
   lastTime = timestamp;
+
+  if (paused) {
+    requestAnimationFrame(loop);
+    return;
+  }
+
   update(delta);
   draw();
   requestAnimationFrame(loop);
@@ -2889,10 +4426,14 @@ if (controlsModule) {
       phaseCountdownEndsAt,
       currentPhase,
       deceptiveStage: deceptivePhase.stage,
+      minigameActive: arcadeMinigame.mode === 'countdown' || arcadeMinigame.mode === 'active',
       minigunCharges,
       hammerCount
     }),
     setHorizontalKey: (key, value) => {
+      keys[key] = value;
+    },
+    setVerticalKey: (key, value) => {
       keys[key] = value;
     },
     onTogglePause: togglePause,
@@ -2901,6 +4442,9 @@ if (controlsModule) {
     onDeployMinigun: deployMinigun,
     onDeployTurret: deployTurret,
     onFireDeceptiveShot: fireDeceptiveShot,
+    onActivateBdod: activateBdodMode,
+    onSetMinigameDirection: setArcadeDirection,
+    onMinigameKeyPress: handleArcadeKeyPress,
     onResetGame: resetGame,
     onTriggerActionPower: triggerActionPower,
     onMovePaddleByClientX: movePaddleByClientX,
