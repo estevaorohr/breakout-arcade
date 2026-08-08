@@ -2,8 +2,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const host = process.env.HOST || '0.0.0.0';
-const port = Number(process.env.PORT) || 8000;
+const host = '127.0.0.1';
+const port = 8000;
 const root = __dirname;
 
 const mimeTypes = {
