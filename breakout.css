@@ -108,6 +108,8 @@ canvas {
   font-size: 0.82rem;
   color: #cbd5e1;
   display: none;
+  user-select: none;
+  pointer-events: none;
 }
 
 .status-bar {
@@ -118,6 +120,8 @@ canvas {
   color: #e2e8f0;
   font-weight: 600;
   font-size: 0.88rem;
+  user-select: none;
+  pointer-events: none;
 }
 
 .status-bar span {
@@ -138,6 +142,8 @@ canvas {
   border: 1px solid rgba(255, 255, 255, 0.12);
   color: #e2e8f0;
   font-weight: 600;
+  user-select: none;
+  pointer-events: none;
 }
 
 .sidebar {

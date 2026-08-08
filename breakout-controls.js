@@ -9,12 +9,16 @@
       actionButton,
       getState,
       setHorizontalKey,
+      setVerticalKey,
       onTogglePause,
       onStartGame,
       onLaunchBallRandom,
       onDeployMinigun,
       onDeployTurret,
       onFireDeceptiveShot,
+      onActivateBdod,
+      onSetMinigameDirection,
+      onMinigameKeyPress,
       onResetGame,
       onTriggerActionPower,
       onMovePaddleByClientX,
@@ -28,6 +32,22 @@
 
     windowRef.addEventListener('keydown', (event) => {
       const state = getState();
+
+      if (state.minigameActive) {
+        onMinigameKeyPress(event.key, performance.now());
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          onSetMinigameDirection(event.key, true);
+          return;
+        }
+        if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+          event.preventDefault();
+          onSetMinigameDirection(event.code, true);
+          return;
+        }
+        event.preventDefault();
+        return;
+      }
 
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         if (state.gameState === 'running') {
@@ -69,15 +89,36 @@
       }
 
       if (event.code === 'ArrowUp') {
-        if (state.gameState === 'running') {
+        if (state.gameState === 'running' && !state.minigameActive) {
           event.preventDefault();
+          setVerticalKey('ArrowUp', true);
           onFireDeceptiveShot();
+        }
+      }
+
+      if (event.code === 'ArrowDown') {
+        if (state.gameState === 'running' && !state.paused && !state.minigameActive) {
+          event.preventDefault();
+          onActivateBdod(performance.now());
         }
       }
     });
 
     windowRef.addEventListener('keyup', (event) => {
       const state = getState();
+      if (state.minigameActive && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+        event.preventDefault();
+        onSetMinigameDirection(event.key, false);
+        return;
+      }
+
+      if (event.code === 'ArrowUp') {
+        if (state.gameState === 'running') {
+          event.preventDefault();
+          setVerticalKey('ArrowUp', false);
+        }
+      }
+
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         if (state.gameState === 'running') {
           event.preventDefault();
@@ -108,9 +149,11 @@
       activePointerStartY = event.clientY;
       activePointerStartAt = performance.now();
       canvas.setPointerCapture(event.pointerId);
-      onMovePaddleByClientX(event.clientX);
-
       const state = getState();
+      if (state.gameState === 'running' && !state.paused) {
+        onMovePaddleByClientX(event.clientX);
+      }
+
       if (state.gameState === 'running' && state.awaitingServe && !state.paused && state.phaseCountdownEndsAt <= 0) {
         onLaunchBallRandom();
         setStatus('Use arrows or drag to move');
@@ -120,6 +163,8 @@
     canvas.addEventListener('pointermove', (event) => {
       if (activePointerId !== event.pointerId) return;
       event.preventDefault();
+      const state = getState();
+      if (state.paused) return;
       onMovePaddleByClientX(event.clientX);
     });
 

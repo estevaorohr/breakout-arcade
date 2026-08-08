@@ -20,10 +20,13 @@
     }
 
     if (type === 'roulette') {
-      if (context.ball && context.spawnedBalls) {
-        api.activateRouletteEffect(context.ball, brick, context.spawnedBalls, now);
-        return true;
-      }
+      const sourceBall = context.ball || {
+        vx: context.sourceVx || 0,
+        vy: context.sourceVy || -api.phaseBallSpeed
+      };
+      const spawnedBalls = context.spawnedBalls || [];
+      api.activateRouletteEffect(sourceBall, brick, spawnedBalls, now);
+      return true;
     }
 
     if (type === 'wave') {
@@ -85,6 +88,25 @@
     if (type === 'shield') {
       api.spawnFallingItem('shield', brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 9, '#1d4ed8', 2.2);
       api.setStatus('Catch the shield');
+      return true;
+    }
+
+    if (type === 'bdod') {
+      api.onBdodBlockBroken(now);
+      api.spawnFallingItem('bdod-token', brick.x + brick.width / 2 - 9, brick.y + brick.height / 2 - 9, '#111827', 2.15);
+      api.setStatus('Catch BDOD to arm the down-arrow defense');
+      return true;
+    }
+
+    if (type === 'flowery') {
+      api.spawnFloweryCompanion(brick, now);
+      api.setStatus('Flowery companion awakened');
+      return true;
+    }
+
+    if (type === 'arcade') {
+      api.startArcadeMinigame(now);
+      api.setStatus('Minigame Time');
       return true;
     }
 

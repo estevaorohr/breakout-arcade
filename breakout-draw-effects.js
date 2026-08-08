@@ -321,8 +321,64 @@
         ctx.fill();
         ctx.strokeStyle = '#bfdbfe';
         ctx.stroke();
+        return;
+      }
+
+      if (item.kind === 'bdod-token') {
+        const cx = item.x + item.width / 2;
+        const cy = item.y + item.height / 2;
+        if (api.bdodSprite && api.bdodSprite.complete && api.bdodSprite.naturalWidth > 0) {
+          ctx.drawImage(api.bdodSprite, item.x, item.y, item.width, item.height);
+        } else {
+          ctx.fillStyle = '#111827';
+          ctx.fillRect(item.x, item.y, item.width, item.height);
+          ctx.strokeStyle = '#f8fafc';
+          ctx.strokeRect(item.x, item.y, item.width, item.height);
+          ctx.fillStyle = '#f8fafc';
+          ctx.font = 'bold 10px Arial';
+          ctx.textAlign = 'center';
+          ctx.fillText('BDOD', cx, cy + 3);
+        }
       }
     });
+  }
+
+  function drawBdodHud(ctx, bdodCharges, bdodActiveUntil, bdodSprite) {
+    if (bdodCharges <= 0) return;
+
+    const now = performance.now();
+    const x = 10;
+    const y = 10;
+    const width = 270;
+    const height = 46;
+
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.8)';
+    ctx.fillRect(x, y, width, height);
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.strokeRect(x, y, width, height);
+
+    if (bdodSprite && bdodSprite.complete && bdodSprite.naturalWidth > 0) {
+      ctx.drawImage(bdodSprite, x + 7, y + 7, 32, 32);
+    } else {
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(x + 7, y + 7, 32, 32);
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.strokeRect(x + 7, y + 7, 32, 32);
+    }
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 12px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(`BDOD x${bdodCharges}`, x + 46, y + 18);
+
+    const activeRemaining = Math.max(0, bdodActiveUntil - now);
+    if (activeRemaining > 0) {
+      ctx.fillStyle = '#86efac';
+      ctx.fillText(`ATIVO: ${(Math.ceil(activeRemaining / 100) / 10).toFixed(1)}s`, x + 46, y + 33);
+    } else {
+      ctx.fillStyle = '#fde68a';
+      ctx.fillText('Seta para baixo: forma BDOD (1,5s)', x + 46, y + 33);
+    }
   }
 
   globalScope.BreakoutDrawEffects = {
@@ -335,6 +391,7 @@
     drawGuessShots,
     drawHammerInventory,
     drawPhaseCountdownOverlay,
-    drawFallingItems
+    drawFallingItems,
+    drawBdodHud
   };
 })(typeof window !== 'undefined' ? window : globalThis);

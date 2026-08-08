@@ -52,6 +52,29 @@
     const leftEyeX = centerX - radius * 0.34;
     const rightEyeX = centerX + radius * 0.34;
 
+    if (mood === 'shock') {
+      const xSize = Math.max(1.8, radius * 0.22);
+      ctx.strokeStyle = '#111827';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(leftEyeX - xSize, eyeY - xSize);
+      ctx.lineTo(leftEyeX + xSize, eyeY + xSize);
+      ctx.moveTo(leftEyeX - xSize, eyeY + xSize);
+      ctx.lineTo(leftEyeX + xSize, eyeY - xSize);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(rightEyeX, eyeY, Math.max(1.2, radius * 0.18), 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(centerX - radius * 0.25, centerY + radius * 0.42);
+      ctx.lineTo(centerX + radius * 0.25, centerY + radius * 0.42);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      return;
+    }
+
     ctx.fillStyle = '#111827';
     ctx.beginPath();
     ctx.arc(leftEyeX, eyeY, 1.4, 0, Math.PI * 2);
