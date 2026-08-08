@@ -39,8 +39,8 @@ jobs:
           cp manifest.webmanifest site/
           cp sw.js site/
           cp cowboy-hat.png site/
-          cp bdod.jfif site/
-          cp bdod-hit.mpeg site/
+              if [ -f bdod.jfif ]; then cp bdod.jfif site/; fi
+              if [ -f bdod-hit.mpeg ]; then cp bdod-hit.mpeg site/; fi
           cp -r icons site/icons
 
       - name: Upload artifact
